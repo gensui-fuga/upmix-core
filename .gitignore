@@ -8,3 +8,6 @@
 # local
 keystore.jks
 /tmp
+
+# release artifacts
+/dist
