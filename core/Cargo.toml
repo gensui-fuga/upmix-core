@@ -1,0 +1,19 @@
+[package]
+name = "upmix-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "High-quality stereo -> 5.1 upmixer (STFT spatial decomposition)"
+
+[lib]
+name = "upmix_core"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+rustfft.workspace = true
+claxon.workspace = true
+hound.workspace = true
+flacenc.workspace = true
+rayon = "1.10"

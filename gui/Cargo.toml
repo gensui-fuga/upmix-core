@@ -1,0 +1,37 @@
+[package]
+name = "upmix-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared egui GUI for upmix-core (desktop + Android)"
+
+[[bin]]
+name = "upmix-gui"
+path = "src/main.rs"
+
+[lib]
+name = "upmix_gui"
+path = "src/lib.rs"
+
+[dependencies]
+upmix-core.workspace = true
+anyhow.workspace = true
+egui = "0.36"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "wayland",
+    "x11",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "android-native-activity",
+] }
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+log = "0.4"

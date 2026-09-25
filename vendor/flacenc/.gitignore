@@ -1,0 +1,22 @@
+/target
+/flacenc-bin/target
+/flacdec-bin/target
+/Cargo.lock
+# debug workspaces
+/debug
+# Test materials
+/report/out
+/testwav
+# Reference implementation
+/flac-1.*
+# Working-copy-specific config
+/.cargo/config.toml
+/.vscode
+# artifacts from xctrace
+/Launch_*
+# artifacts made by run_reporter.sh
+/venv
+profile.pb
+# artifacts used in bench_runner
+key.json
+.env

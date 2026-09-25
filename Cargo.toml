@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["core", "cli", "gui", "tui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.82"
+
+[workspace.dependencies]
+upmix-core = { path = "core" }
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+rustfft = "6.4.1"
+claxon = "0.4.3"
+hound = "3.5.1"
+flacenc = "0.5.1"
+
+# Local patch of flacenc 0.5.1: the upstream crate can emit multi-GB frames on
+# 24-bit signal->silence transitions (flacenc-rs issue #256). The pure-Rust
+# encoder is only a fallback; the CLI/Android paths prefer the system `flac`.
+[patch.crates-io]
+flacenc = { path = "vendor/flacenc" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

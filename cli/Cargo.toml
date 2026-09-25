@@ -1,0 +1,14 @@
+[package]
+name = "upmix-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI front-end for upmix-core"
+
+[[bin]]
+name = "upmix-core"
+path = "src/main.rs"
+
+[dependencies]
+upmix-core.workspace = true
+anyhow.workspace = true
