@@ -51,9 +51,19 @@ pub struct App {
     demucs_model: String,
     keep_stems: bool,
 
+    // input
+    indir: String,
+
     // output
     outdir: String,
     batch: bool,
+
+    // wallpaper
+    wallpaper: Option<egui::TextureHandle>,
+    wallpaper_path: String,
+    wallpaper_msg: Option<String>,
+    /// 材质卡片的透明度 0.0–1.0（仅对有材质层的主题生效）。
+    card_alpha: f32,
 
     status: String,
     status_ok: Option<bool>,
@@ -66,7 +76,8 @@ pub struct App {
 
 impl App {
     pub fn new(initial: Option<PathBuf>) -> Self {
-        let mut files = scan();
+        let indir = default_music_dir();
+        let mut files = scan_dir(&indir);
         let mut selected = None;
         if let Some(p) = &initial {
             if !files.contains(p) {
@@ -75,6 +86,7 @@ impl App {
             selected = files.iter().position(|f| f == p);
         }
         let theme = theme::washi();
+        let card_alpha = theme.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
         Self {
             files,
             selected,
@@ -90,8 +102,13 @@ impl App {
             win_size: 4096,
             demucs_model: "htdemucs".into(),
             keep_stems: false,
+            indir,
             outdir: String::new(),
             batch: false,
+            wallpaper: None,
+            wallpaper_path: String::new(),
+            wallpaper_msg: None,
+            card_alpha,
             status: "选择一首歌，然后开始。".into(),
             status_ok: None,
             progress: 0.0,
@@ -190,7 +207,8 @@ impl App {
                     self.status_ok = Some(false);
                 }
             }
-            self.files = scan();
+            self.files = scan_dir(&self.indir);
+            self.selected = None;
         }
     }
 
@@ -211,8 +229,29 @@ impl eframe::App for App {
         if self.running {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
         }
+        // 透明度可调：保留卡片原色（霓虹是紫的），只改 alpha。
+        if self.theme.layered() {
+            let [r, g, b, _] = self.theme.card.to_srgba_unmultiplied();
+            let a = (self.card_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+            self.theme.card = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+        }
         theme::apply(ui.ctx(), &self.theme, self.accent);
-        theme::paint_backdrop(ui, &self.theme);
+        match self.wallpaper.clone() {
+            Some(tex) => theme::paint_wallpaper(ui, &self.theme, &tex),
+            None => theme::paint_backdrop(ui, &self.theme),
+        }
+
+        // 把图片拖进窗口 = 设为壁纸。
+        let dropped: Vec<std::path::PathBuf> = ui.ctx().input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if let Some(p) = dropped.first() {
+            self.set_wallpaper(ui.ctx(), p);
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
@@ -273,16 +312,30 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("音源").size(16.0).color(self.theme.ink));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("⟳ 重新扫描").clicked() {
-                        self.files = scan();
+                    if ui.small_button("⟳ 扫描").clicked() {
+                        self.files = scan_dir(&self.indir);
+                        self.selected = None;
                     }
                 });
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("音乐文件夹").color(self.theme.ink2));
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.indir)
+                        .hint_text("要转换的目录，回车扫描")
+                        .desired_width(ui.available_width()),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    self.files = scan_dir(&self.indir);
+                    self.selected = None;
+                }
             });
             ui.add_space(2.0);
             theme::hairline(ui, &self.theme);
             ui.add_space(6.0);
             if self.files.is_empty() {
-                ui.label(RichText::new("没找到 .flac/.wav。把文件放进 Music/ 或 Download/。").color(self.theme.ink3));
+                ui.label(RichText::new("没找到 .flac/.wav。上面填个音乐文件夹再回车。").color(self.theme.ink3));
             }
             egui::ScrollArea::vertical()
                 .id_salt("filelist")
@@ -384,6 +437,38 @@ impl App {
         });
     }
 
+    /// 按 id 切换主题（washi/millennium/neon/dream/ink/plain）。
+    pub fn set_theme_by_id(&mut self, id: &str) {
+        let presets = theme::presets();
+        for (i, t) in presets.iter().enumerate() {
+            if t.id == id {
+                self.theme_idx = i;
+                self.theme = t.clone();
+                self.accent = t.accent;
+                self.card_alpha = t.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
+                return;
+            }
+        }
+    }
+
+    pub fn set_wallpaper(&mut self, ctx: &egui::Context, path: &Path) {
+        match theme::load_wallpaper(ctx, path) {
+            Ok(tex) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                self.wallpaper = Some(tex);
+                self.wallpaper_path = path.to_string_lossy().into_owned();
+                self.wallpaper_msg = Some(format!("壁纸已加载：{name}"));
+            }
+            Err(e) => {
+                self.wallpaper_msg = Some(format!("加载失败：{e}"));
+            }
+        }
+    }
+
     fn tab_settings(&mut self, ui: &mut egui::Ui) {
         theme::card(&self.theme).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -399,6 +484,7 @@ impl App {
                         self.theme_idx = i;
                         self.theme = t.clone();
                         self.accent = t.accent;
+                        self.card_alpha = t.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
                     }
                 }
             });
@@ -410,13 +496,76 @@ impl App {
                     self.accent = self.theme.accent;
                 }
             });
+            if self.theme.layered() {
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Slider::new(&mut self.card_alpha, 0.0..=1.0)
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                        .text("卡片透明度"),
+                );
+                if ui.small_button("重置透明度").clicked() {
+                    self.card_alpha = self.theme.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
+                }
+            }
             ui.add_space(4.0);
             ui.label(
-                RichText::new("液态玻璃：深色通透背景 + 半透明磨砂卡片（egui 无法真实模糊背景，用半透明+高光+阴影模拟）。")
+                RichText::new("千禧：银色铬金属 + 虹彩扫光。霓虹：黑紫底 + 发光描边。梦核：粉彩柔光、朦胧。三者都可用下面的壁纸增强。")
                     .size(12.0)
                     .color(self.theme.ink3),
             );
         });
+
+        ui.add_space(12.0);
+
+        // wallpaper
+        let mut do_load = false;
+        let mut do_clear = false;
+        theme::card(&self.theme).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("背景壁纸").size(16.0).color(self.theme.ink));
+            ui.add_space(2.0);
+            theme::hairline(ui, &self.theme);
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("选一张图当背景，液态玻璃会透出它的颜色（这就是 iOS 的“颜色由周围内容决定”）。也可以直接把图片拖进窗口。")
+                    .size(12.5)
+                    .color(self.theme.ink3),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("图片路径").color(self.theme.ink2));
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.wallpaper_path)
+                        .hint_text("/home/ye/Pictures/wall.jpg")
+                        .desired_width(ui.available_width()),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    do_load = true;
+                }
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("加载壁纸").clicked() {
+                    do_load = true;
+                }
+                if ui.button("移除壁纸").clicked() {
+                    do_clear = true;
+                }
+            });
+            if let Some(m) = &self.wallpaper_msg {
+                ui.add_space(4.0);
+                let c = if self.wallpaper.is_some() { self.theme.ok } else { self.theme.ink3 };
+                ui.label(RichText::new(m).size(12.5).color(c));
+            }
+        });
+        if do_clear {
+            self.wallpaper = None;
+            self.wallpaper_msg = Some("已移除壁纸".into());
+        }
+        if do_load {
+            let p = std::path::PathBuf::from(self.wallpaper_path.trim());
+            self.set_wallpaper(ui.ctx(), &p);
+        }
     }
 }
 
@@ -607,29 +756,42 @@ fn find_stems(root: &Path, track: &str) -> Option<PathBuf> {
     walk(root, track)
 }
 
-fn scan() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = vec![
-        PathBuf::from("/storage/emulated/0/Music"),
-        PathBuf::from("/storage/emulated/0/Download"),
-    ];
+fn default_music_dir() -> String {
     if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(&home).join("Music"));
-        dirs.push(PathBuf::from(home).join("Downloads"));
-    }
-    dirs.push(PathBuf::from("."));
-    let mut out = Vec::new();
-    for d in dirs {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if let Some(ext) = p.extension().and_then(|x| x.to_str()) {
-                if matches!(ext.to_ascii_lowercase().as_str(), "flac" | "wav") {
-                    out.push(p);
-                }
-            }
+        let m = PathBuf::from(&home).join("Music");
+        if m.is_dir() {
+            return m.to_string_lossy().into_owned();
         }
+        return PathBuf::from(home).to_string_lossy().into_owned();
     }
+    ".".into()
+}
+
+/// 扫描目录里的 .flac/.wav，向下最多两层。
+fn scan_dir(dir: &str) -> Vec<PathBuf> {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    collect(&PathBuf::from(dir), 2, &mut out);
     out.sort();
     out.dedup();
     out
+}
+
+fn collect(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if depth > 1 {
+                collect(&p, depth - 1, out);
+            }
+        } else if let Some(ext) = p.extension().and_then(|x| x.to_str()) {
+            if matches!(ext.to_ascii_lowercase().as_str(), "flac" | "wav") {
+                out.push(p);
+            }
+        }
+    }
 }

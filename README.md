@@ -49,7 +49,20 @@ upmix-core 两种都给你：
 upmix-gui
 ```
 
-多主题（和纸 / 液态玻璃 / 墨夜 / 素白）、自选强调色、内建教程页、批量处理。
+**六套主题**：和纸（默认）、千禧（银铬金属反光）、霓虹（黑底蓝红光幕）、梦核（粉彩柔光）、墨夜、素白。
+
+- **可调卡片透明度**（设置页滑块，只改 alpha 保留卡片原色）
+- **背景壁纸**：填路径或直接把图片拖进窗口；图片会缩到长边 640 再高斯模糊，玻璃/光幕透出它的颜色
+- 自选强调色、内建教程页、批量处理
+
+启动时可指定：
+
+```bash
+UPMIX_THEME=millennium upmix-gui                      # 主题
+UPMIX_WALLPAPER=~/Pictures/wall.jpg upmix-gui         # 壁纸
+```
+
+主题 id：`washi` / `millennium` / `neon` / `dream` / `ink` / `plain`。
 
 ### 命令行
 

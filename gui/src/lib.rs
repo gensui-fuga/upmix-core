@@ -19,7 +19,20 @@ pub fn run_desktop(initial: Option<std::path::PathBuf>) -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             theme::install_fonts(&cc.egui_ctx);
-            Ok(Box::new(App::new(initial)))
+            let mut app = App::new(initial);
+            // UPMIX_THEME=washi|millennium|neon|dream|ink|plain
+            if let Ok(id) = std::env::var("UPMIX_THEME") {
+                if !id.trim().is_empty() {
+                    app.set_theme_by_id(id.trim());
+                }
+            }
+            // UPMIX_WALLPAPER=/path/to/image 可在启动时直接带壁纸。
+            if let Ok(p) = std::env::var("UPMIX_WALLPAPER") {
+                if !p.trim().is_empty() {
+                    app.set_wallpaper(&cc.egui_ctx, std::path::Path::new(p.trim()));
+                }
+            }
+            Ok(Box::new(app))
         }),
     )
 }
