@@ -360,24 +360,15 @@ impl App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui.button("选择文件…").clicked() {
-                    if let Some(paths) = rfd::FileDialog::new()
-                        .set_title("选择音乐文件（可多选）")
-                        .add_filter("音频", &["flac", "wav"])
-                        .pick_files()
-                    {
-                        for p in paths {
-                            if !self.files.iter().any(|f| f == &p) {
-                                self.files.push(p);
-                            }
+                    for p in pick_audio_files() {
+                        if !self.files.iter().any(|f| f == &p) {
+                            self.files.push(p);
                         }
-                        self.files.sort();
                     }
+                    self.files.sort();
                 }
                 if ui.button("选择文件夹…").clicked() {
-                    if let Some(d) = rfd::FileDialog::new()
-                        .set_title("选择音乐文件夹")
-                        .pick_folder()
-                    {
+                    if let Some(d) = pick_music_dir() {
                         self.indir = d.to_string_lossy().into_owned();
                         self.files = scan_dir(&self.indir);
                         self.selected = None;
@@ -668,6 +659,82 @@ fn tab_tutorial(ui: &mut egui::Ui, t: &Theme) {
 }
 
 // ---- workers ----
+
+/// 选多个音频文件——调系统自己的文件对话框。
+fn pick_audio_files() -> Vec<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        return zenity_dialog(false);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return powershell_dialog(false);
+    }
+    #[allow(unreachable_code)]
+    Vec::new()
+}
+
+/// 选一个文件夹。
+fn pick_music_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        return zenity_dialog(true).into_iter().next();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return powershell_dialog(true).into_iter().next();
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Linux：zenity（GNOME 的文件选择器，走 GTK 原生对话框）。
+#[cfg(target_os = "linux")]
+fn zenity_dialog(dir: bool) -> Vec<PathBuf> {
+    let mut c = std::process::Command::new("zenity");
+    c.arg("--file-selection");
+    if dir {
+        c.arg("--directory").arg("--title=选择音乐文件夹");
+    } else {
+        c.arg("--multiple")
+            .arg("--separator=\n")
+            .arg("--file-filter=音频 | *.flac *.wav")
+            .arg("--title=选择音乐文件（可多选）");
+    }
+    let Ok(out) = c.output() else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Windows：PowerShell 调 WinForms 的 OpenFileDialog / FolderBrowserDialog，
+/// 就是资源管理器里那个原生对话框。-STA 是 WinForms 必须的。
+#[cfg(target_os = "windows")]
+fn powershell_dialog(dir: bool) -> Vec<PathBuf> {
+    let script = if dir {
+        r#"Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = '选择音乐文件夹'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }"#
+    } else {
+        r#"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Multiselect = $true; $f.Title = '选择音乐文件（可多选）'; $f.Filter = '音频 (*.flac;*.wav)|*.flac;*.wav|所有文件 (*.*)|*.*'; if ($f.ShowDialog() -eq 'OK') { [Console]::Out.Write(($f.FileNames -join [Environment]::NewLine)) }"#
+    };
+    let Ok(out) = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", script])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
 
 /// 展开 `~/`（Linux/macOS）或 `~\` 风格路径；拼接一律交给 PathBuf，Windows 会自己用 `\`。
 fn expand(path: &str) -> PathBuf {
