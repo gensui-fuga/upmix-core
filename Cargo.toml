@@ -25,6 +25,8 @@ flacenc = { path = "vendor/flacenc" }
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+# 之前是 lto = true + codegen-units = 1，等于关掉并行代码生成再做全量 LTO，
+# 编译慢到发疯。thin LTO + 多 codegen unit 能开满所有核心，产物差别很小。
+lto = "thin"
+codegen-units = 16
 strip = true

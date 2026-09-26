@@ -64,6 +64,8 @@ pub struct App {
     wallpaper_msg: Option<String>,
     /// 材质卡片的透明度 0.0–1.0（仅对有材质层的主题生效）。
     card_alpha: f32,
+    /// 上次已写入配置的组合，避免每帧落盘。
+    last_saved: Option<(String, [u8; 4], u8)>,
 
     status: String,
     status_ok: Option<bool>,
@@ -87,7 +89,7 @@ impl App {
         }
         let theme = theme::washi();
         let card_alpha = theme.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
-        Self {
+        let mut app = Self {
             files,
             selected,
             mode: Mode::Fast,
@@ -109,6 +111,7 @@ impl App {
             wallpaper_path: String::new(),
             wallpaper_msg: None,
             card_alpha,
+            last_saved: None,
             status: "选择一首歌，然后开始。".into(),
             status_ok: None,
             progress: 0.0,
@@ -116,7 +119,19 @@ impl App {
             running: false,
             rx: None,
             started: None,
+        };
+        // 读上次的主题 / 强调色 / 透明度。
+        if let Some((id, accent, alpha)) = load_config() {
+            app.set_theme_by_id(&id);
+            if let Some(a) = accent {
+                app.accent = egui::Color32::from_rgba_unmultiplied(a[0], a[1], a[2], a[3]);
+            }
+            if let Some(v) = alpha {
+                app.card_alpha = v.clamp(0.0, 1.0);
+            }
+            app.last_saved = Some((id, app.accent.to_srgba_unmultiplied(), (app.card_alpha * 255.0) as u8));
         }
+        app
     }
 
     fn fast_config(&self) -> UpmixConfig {
@@ -253,6 +268,17 @@ impl eframe::App for App {
             self.set_wallpaper(ui.ctx(), p);
         }
 
+        // 主题 / 强调色 / 透明度一变就存盘，下次启动直接恢复。
+        let sig = (
+            self.theme.id.to_string(),
+            self.accent.to_srgba_unmultiplied(),
+            (self.card_alpha * 255.0) as u8,
+        );
+        if self.last_saved.as_ref() != Some(&sig) {
+            save_config(self.theme.id, self.accent, self.card_alpha);
+            self.last_saved = Some(sig);
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
             .show(ui, |ui| {
@@ -329,6 +355,33 @@ impl App {
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.files = scan_dir(&self.indir);
                     self.selected = None;
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("选择文件…").clicked() {
+                    if let Some(paths) = rfd::FileDialog::new()
+                        .set_title("选择音乐文件（可多选）")
+                        .add_filter("音频", &["flac", "wav"])
+                        .pick_files()
+                    {
+                        for p in paths {
+                            if !self.files.iter().any(|f| f == &p) {
+                                self.files.push(p);
+                            }
+                        }
+                        self.files.sort();
+                    }
+                }
+                if ui.button("选择文件夹…").clicked() {
+                    if let Some(d) = rfd::FileDialog::new()
+                        .set_title("选择音乐文件夹")
+                        .pick_folder()
+                    {
+                        self.indir = d.to_string_lossy().into_owned();
+                        self.files = scan_dir(&self.indir);
+                        self.selected = None;
+                    }
                 }
             });
             ui.add_space(2.0);
@@ -616,6 +669,76 @@ fn tab_tutorial(ui: &mut egui::Ui, t: &Theme) {
 
 // ---- workers ----
 
+/// 展开 `~/`（Linux/macOS）或 `~\` 风格路径；拼接一律交给 PathBuf，Windows 会自己用 `\`。
+fn expand(path: &str) -> PathBuf {
+    let p = path.trim();
+    if p == "~" {
+        if let Some(h) = std::env::var_os("HOME") {
+            return PathBuf::from(h);
+        }
+    }
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(h) = std::env::var_os("HOME") {
+            return PathBuf::from(h).join(rest);
+        }
+    }
+    if let Some(rest) = p.strip_prefix("~\\") {
+        if let Some(h) = std::env::var_os("USERPROFILE") {
+            return PathBuf::from(h).join(rest);
+        }
+    }
+    PathBuf::from(p)
+}
+
+// ---- 配置持久化：记住主题 / 强调色 / 透明度 ----
+
+fn config_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("upmix-gui").join("config.txt"))
+}
+
+fn load_config() -> Option<(String, Option<[u8; 4]>, Option<f32>)> {
+    let txt = std::fs::read_to_string(config_path()?).ok()?;
+    let mut theme = String::new();
+    let mut accent: Option<[u8; 4]> = None;
+    let mut alpha: Option<f32> = None;
+    for line in txt.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let v = v.trim();
+        match k.trim() {
+            "theme" => theme = v.to_string(),
+            "accent" => {
+                let n: Vec<u8> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if n.len() == 4 {
+                    let mut a = [0u8; 4];
+                    a.copy_from_slice(&n);
+                    accent = Some(a);
+                }
+            }
+            "card_alpha" => alpha = v.parse().ok(),
+            _ => {}
+        }
+    }
+    if theme.is_empty() {
+        None
+    } else {
+        Some((theme, accent, alpha))
+    }
+}
+
+fn save_config(theme_id: &str, accent: egui::Color32, alpha: f32) {
+    let Some(p) = config_path() else { return };
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    let [r, g, b, a] = accent.to_srgba_unmultiplied();
+    let body = format!("theme={theme_id}\naccent={r},{g},{b},{a}\ncard_alpha={alpha}\n");
+    std::fs::write(p, body).ok();
+}
+
 fn out_path_for(input: &Path, outdir: &str) -> PathBuf {
     let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
     let name = format!("{stem}_5.1.flac");
@@ -774,7 +897,7 @@ fn scan_dir(dir: &str) -> Vec<PathBuf> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    collect(&PathBuf::from(dir), 2, &mut out);
+    collect(&expand(dir), 2, &mut out);
     out.sort();
     out.dedup();
     out
