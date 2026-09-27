@@ -30,6 +30,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: 构建
+        # 锁住指令集：CI 的 runner 是新 CPU（有 AVX-512），默认编出来的二进制
+        # 在老机器（如 Ivy Bridge）上会直接 SIGILL。x86-64-v2 = SSE4.2 一代，
+        # 2009 年后的 CPU 都支持，且不含 AVX2。
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v2"
         run: cargo build --release
 
       - name: 取静态 ffmpeg（随包分发，用户不用自己装）
@@ -77,6 +82,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: 构建
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v2"
         run: cargo build --release
 
       - name: 取静态 ffmpeg（随包分发）
