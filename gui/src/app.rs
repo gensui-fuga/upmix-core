@@ -979,24 +979,6 @@ fn file_name(p: &Path) -> String {
     p.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string()
 }
 
-fn find_stems(root: &Path, track: &str) -> Option<PathBuf> {
-    fn walk(dir: &Path, track: &str) -> Option<PathBuf> {
-        for e in std::fs::read_dir(dir).ok()?.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                if p.file_name().and_then(|n| n.to_str()) == Some(track) && p.join("vocals.wav").exists() {
-                    return Some(p);
-                }
-                if let Some(f) = walk(&p, track) {
-                    return Some(f);
-                }
-            }
-        }
-        None
-    }
-    walk(root, track)
-}
-
 fn default_music_dir() -> String {
     if let Some(home) = std::env::var_os("HOME") {
         let m = PathBuf::from(&home).join("Music");
