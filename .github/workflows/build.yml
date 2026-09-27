@@ -110,6 +110,9 @@ jobs:
           WEXES=$(find upmix-windows -type f -name '*.exe')
           WFF=$(find upmix-windows -type f -name 'ffmpeg.exe' | head -1)
           WDIR=$(dirname "$(find upmix-windows -type f -name upmix-gui.exe | head -1)")
+          test -n "$WDIR" && test -n "$WFF"
+          # ffmpeg.exe 在 artifact 根目录，不在 target/release 里，得手动放过去。
+          cp "$WFF" "$WDIR/ffmpeg.exe"
           (cd "$WDIR" && zip -j "$GITHUB_WORKSPACE/upmix-core-windows-x86_64.zip" *.exe)
           ls -la "$GITHUB_WORKSPACE"/*.tar.gz "$GITHUB_WORKSPACE"/*.zip
 
