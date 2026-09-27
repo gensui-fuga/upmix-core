@@ -481,18 +481,29 @@ impl App {
         });
     }
 
-    /// 按 id 切换主题（washi/millennium/neon/dream/ink/plain）。
-    pub fn set_theme_by_id(&mut self, id: &str) {
-        let presets = theme::presets();
-        for (i, t) in presets.iter().enumerate() {
+    /// 按 id 切换主题（washi/millennium/neon/dream/ink/plain），切换后立即落盘。
+    pub fn set_theme_by_id(&mut self, id: &str) -> bool {
+        for (i, t) in theme::presets().iter().enumerate() {
             if t.id == id {
                 self.theme_idx = i;
                 self.theme = t.clone();
                 self.accent = t.accent;
                 self.card_alpha = t.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
-                return;
+                self.persist();
+                return true;
             }
         }
+        false
+    }
+
+    /// 把当前主题 / 强调色 / 透明度写进配置。
+    pub fn persist(&mut self) {
+        save_config(self.theme.id, self.accent, self.card_alpha);
+        self.last_saved = Some((
+            self.theme.id.to_string(),
+            self.accent.to_srgba_unmultiplied(),
+            (self.card_alpha * 255.0) as u8,
+        ));
     }
 
     pub fn set_wallpaper(&mut self, ctx: &egui::Context, path: &Path) {
@@ -514,6 +525,7 @@ impl App {
     }
 
     fn tab_settings(&mut self, ui: &mut egui::Ui) {
+        let mut dirty = false;
         theme::card(&self.theme).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new("主题").size(16.0).color(self.theme.ink));
@@ -529,26 +541,36 @@ impl App {
                         self.theme = t.clone();
                         self.accent = t.accent;
                         self.card_alpha = t.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
+                        dirty = true;
                     }
                 }
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("强调色").color(self.theme.ink2));
-                ui.color_edit_button_srgba(&mut self.accent);
+                if ui.color_edit_button_srgba(&mut self.accent).changed() {
+                    dirty = true;
+                }
                 if ui.small_button("恢复默认").clicked() {
                     self.accent = self.theme.accent;
+                    dirty = true;
                 }
             });
             if self.theme.layered() {
                 ui.add_space(6.0);
-                ui.add(
-                    egui::Slider::new(&mut self.card_alpha, 0.0..=1.0)
-                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                        .text("卡片透明度"),
-                );
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.card_alpha, 0.0..=1.0)
+                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                            .text("卡片透明度"),
+                    )
+                    .changed()
+                {
+                    dirty = true;
+                }
                 if ui.small_button("重置透明度").clicked() {
                     self.card_alpha = self.theme.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
+                    dirty = true;
                 }
             }
             ui.add_space(4.0);
@@ -558,6 +580,9 @@ impl App {
                     .color(self.theme.ink3),
             );
         });
+        if dirty {
+            self.persist();
+        }
 
         ui.add_space(12.0);
 

@@ -48,6 +48,10 @@ pub struct Cli {
     #[arg(long)]
     pub external_demucs: bool,
 
+    /// 只把内置分离的模型下载到本地缓存，不处理音频。打包时用。
+    #[arg(long)]
+    pub prepare_model: bool,
+
     /// Demucs model name (auto mode).
     #[arg(long, default_value = "htdemucs")]
     pub model: String,
@@ -114,6 +118,18 @@ fn write_any(path: &Path, buf: &AudioBuffer, source: Option<&Path>) -> Result<()
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    // 打包用：把内置分离的模型先下到本地缓存就退出（CI 用它把模型收进发行包）。
+    if cli.prepare_model {
+        let out = cli
+            .outdir
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("models"));
+        crate::builtin_sep::prepare_model(&out)?;
+        eprintln!("[model] 已写入 {}", out.display());
+        return Ok(());
+    }
 
     let normalize = match cli.normalize.as_str() {
         "peak" => NormalizeMode::Peak,
@@ -283,28 +299,21 @@ fn run_auto(cli: &Cli, input: &Path, out_path: &Path, verbose: bool, t0: Instant
             wav::read(&dir.join("other.wav"))?,
         ),
         None => {
-            // 内置模型固定按 44.1k 训练：源不是 44.1k 就先重采样，写个临时 WAV 喂进去。
-            let feed = {
-                let src = crate::fileio::read_any(input)?;
-                if src.sample_rate == 44100 {
-                    input.to_path_buf()
-                } else {
-                    if !cli.quiet {
-                        eprintln!("[auto] resampling {} Hz -> 44100 Hz for the model", src.sample_rate);
-                    }
-                    let rs = resample(&src, 44100)?;
-                    let p = tmp.join("builtin-in-44k.wav");
-                    wav::write(&p, &rs)?;
-                    p
+            // 内置离线引擎：读进来、非 44.1k 就先重采样，直接跑模型（不联网、不经文件）。
+            let src = crate::fileio::read_any(input)?;
+            let feed = if src.sample_rate == 44100 {
+                src
+            } else {
+                if !cli.quiet {
+                    eprintln!("[auto] resampling {} Hz -> 44100 Hz for the model", src.sample_rate);
                 }
+                resample(&src, 44100)?
             };
-            let s = crate::builtin_sep::separate(&feed, &tmp.join("builtin"))?;
-            (
-                wav::read(&s.vocals)?,
-                wav::read(&s.drums)?,
-                wav::read(&s.bass)?,
-                wav::read(&s.other)?,
-            )
+            if feed.num_channels() < 2 {
+                bail!("input must be stereo for auto mode");
+            }
+            let s = crate::builtin_sep::separate(&feed)?;
+            (s.vocals, s.drums, s.bass, s.other)
         }
     };
     let stem_sr = vocals.sample_rate;

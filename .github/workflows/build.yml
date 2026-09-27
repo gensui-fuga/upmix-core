@@ -45,6 +45,12 @@ jobs:
           chmod +x dist-ffmpeg
           ./dist-ffmpeg -version | head -1
 
+      - name: 预取模型（打进包，用户首次运行就不用联网）
+        run: |
+          set -eux
+          ./target/release/upmix-core --prepare-model --outdir models
+          ls -la models/
+
       - uses: actions/upload-artifact@v4
         with:
           name: upmix-linux
@@ -53,6 +59,7 @@ jobs:
             target/release/upmix-core
             target/release/upmix-tui
             dist-ffmpeg
+            models/*
 
   windows:
     # ort 没有 x86_64-pc-windows-gnu 的预编译库，必须用 MSVC 原生构建。
@@ -104,8 +111,12 @@ jobs:
           chmod +x "$GUI" "$CORE" "$TUI" "$LFF"
           LDIR=$(dirname "$GUI")
           cp "$LFF" "$LDIR/ffmpeg"
+          # 模型是平台无关的 ONNX，两个包共用同一份。
+          MODELS=$(find upmix-linux -type d -name models | head -1)
+          test -n "$MODELS"
+          cp -r "$MODELS" "$LDIR/models"
           (cd "$LDIR" && tar czf "$GITHUB_WORKSPACE/upmix-core-linux-x86_64.tar.gz" \
-             upmix-gui upmix-core upmix-tui ffmpeg)
+             upmix-gui upmix-core upmix-tui ffmpeg models)
 
           WEXES=$(find upmix-windows -type f -name '*.exe')
           WFF=$(find upmix-windows -type f -name 'ffmpeg.exe' | head -1)
@@ -113,7 +124,8 @@ jobs:
           test -n "$WDIR" && test -n "$WFF"
           # ffmpeg.exe 在 artifact 根目录，不在 target/release 里，得手动放过去。
           cp "$WFF" "$WDIR/ffmpeg.exe"
-          (cd "$WDIR" && zip -j "$GITHUB_WORKSPACE/upmix-core-windows-x86_64.zip" *.exe)
+          cp -r "$MODELS" "$WDIR/models"
+          (cd "$WDIR" && zip -r -q "$GITHUB_WORKSPACE/upmix-core-windows-x86_64.zip" . -i '*.exe' -i 'models/*')
           ls -la "$GITHUB_WORKSPACE"/*.tar.gz "$GITHUB_WORKSPACE"/*.zip
 
       - uses: softprops/action-gh-release@v2

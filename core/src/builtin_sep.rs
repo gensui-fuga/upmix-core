@@ -1,73 +1,173 @@
 //! 内置源分离：纯 Rust + ONNX Runtime，替代外挂的 Python `demucs`。
 //!
-//! 用 [stem-splitter-core] 跑 htdemucs，产出 vocals / drums / bass / other 四个
-//! 44.1kHz 立体声 WAV，再由 `auto::route` 摆到 5.1。
+//! 优先走**离线路径**：从可执行文件旁边的 `models/` 读 manifest.json + *.onnx，
+//! 直接用 `stem_splitter_core::core::engine` 推理，全程不联网、不需要 Python。
 //!
-//! 不需要 Python、不需要 pip。模型由 stem-splitter-core 管理（带 SHA-256 校验），
-//! 默认缓存在用户目录；若随发行包预置了模型，则不会联网。
+//! 只有本地没有模型时，才回退到 stem-splitter-core 的 `split_file`（那次会联网下模型）。
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// 四个 stem 的 WAV 路径。
-#[derive(Debug, Clone)]
-pub struct Stems {
-    pub vocals: PathBuf,
-    pub drums: PathBuf,
-    pub bass: PathBuf,
-    pub other: PathBuf,
+use crate::io::pcm::AudioBuffer;
+
+/// 四个 stem 的 PCM（都是 44.1kHz 立体声）。
+pub struct StemAudio {
+    pub vocals: AudioBuffer,
+    pub drums: AudioBuffer,
+    pub bass: AudioBuffer,
+    pub other: AudioBuffer,
 }
 
-impl Stems {
-    /// 按 vocals / drums / bass / other 顺序返回，方便依次读取。
-    pub fn all(&self) -> [&Path; 4] {
-        [
-            &self.vocals,
-            &self.drums,
-            &self.bass,
-            &self.other,
-        ]
-    }
+/// 把模型（manifest.json + *.onnx）拉到 `out_dir`，打包时用。
+pub fn prepare_model(out_dir: &Path) -> Result<()> {
+    let handle = stem_splitter_core::model::model_manager::ensure_model("htdemucs", None)
+        .map_err(|e| anyhow::anyhow!("下载模型失败: {e}"))?;
+    std::fs::create_dir_all(out_dir)?;
+    let name = handle
+        .local_path
+        .file_name()
+        .context("模型文件没有文件名")?;
+    std::fs::copy(&handle.local_path, out_dir.join(name))
+        .with_context(|| format!("拷贝 {}", handle.local_path.display()))?;
+    let json = serde_json::to_string_pretty(&handle.manifest)?;
+    std::fs::write(out_dir.join("manifest.json"), json)?;
+    Ok(())
 }
 
-/// 跑一次内置分离，把四个 stem 写进 `out_dir`，返回它们的路径。
-pub fn separate(input: &Path, out_dir: &Path) -> Result<Stems> {
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("creating {}", out_dir.display()))?;
-
-    let opts = stem_splitter_core::SplitOptions {
-        output_dir: out_dir.to_string_lossy().into_owned(),
-        model_name: "htdemucs".to_string(),
-        manifest_url_override: None,
-    };
-
-    stem_splitter_core::split_file(&input.to_string_lossy(), opts)
-        .map_err(|e| anyhow::anyhow!("built-in separation failed: {e}"))?;
-
-    let stem = input
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    let p = |kind: &str| out_dir.join(format!("{stem}_{kind}.wav"));
-
-    let stems = Stems {
-        vocals: p("vocals"),
-        drums: p("drums"),
-        bass: p("bass"),
-        other: p("other"),
-    };
-
-    for f in stems.all() {
-        if !f.exists() {
-            anyhow::bail!("内置分离没产出 {}", f.display());
+/// 找模型目录：优先程序旁边，再当前目录。
+fn model_dir() -> Option<PathBuf> {
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            cands.push(dir.join("models"));
         }
     }
-    Ok(stems)
+    cands.push(PathBuf::from("models"));
+    cands.into_iter().find(|p| p.is_dir())
 }
 
-/// 首次运行时确保模型就位（会联网下载，除非已经缓存或随包预置）。
-/// 提前调用可以让 GUI 在开始处理前就把模型准备好。
-pub fn prepare_model() -> Result<()> {
-    stem_splitter_core::prepare_model("htdemucs", None)
-        .map_err(|e| anyhow::anyhow!("preparing model: {e}"))
+/// 从本地目录装配一个 ModelHandle（manifest + onnx）。
+fn local_handle(dir: &Path) -> Option<stem_splitter_core::model::model_manager::ModelHandle> {
+    let manifest_txt = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
+    let manifest: stem_splitter_core::types::ModelManifest =
+        serde_json::from_str(&manifest_txt).ok()?;
+    let onnx = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.extension()
+                .map(|x| x.eq_ignore_ascii_case("onnx"))
+                .unwrap_or(false)
+        })?;
+    Some(stem_splitter_core::model::model_manager::ModelHandle {
+        manifest,
+        local_path: onnx,
+    })
+}
+
+/// 把 f64 planar 输入转成模型要的 (left, right) f32。
+fn to_stereo_f32(buf: &AudioBuffer) -> (Vec<f32>, Vec<f32>) {
+    let ch = buf.num_channels();
+    let n = buf.data.first().map(|c| c.len()).unwrap_or(0);
+    let mut l = Vec::with_capacity(n);
+    let mut r = Vec::with_capacity(n);
+    for i in 0..n {
+        let a = buf.data[0][i];
+        let b = if ch > 1 { buf.data[1][i] } else { a };
+        l.push(a as f32);
+        r.push(b as f32);
+    }
+    (l, r)
+}
+
+/// 跑内置分离，返回四个 stem 的 PCM。
+/// 输入必须是 44.1kHz 立体声（调用方负责重采样）。
+pub fn separate(buf: &AudioBuffer) -> Result<StemAudio> {
+    let dir = model_dir().context(
+        "找不到 models/ 目录。发行包里自带它；如果是自己编译的，先跑 `upmix-core --prepare-model` 生成。",
+    )?;
+    let handle = local_handle(&dir).context("models/ 里的 manifest.json 或 *.onnx 读不了")?;
+
+    stem_splitter_core::core::engine::preload(&handle)
+        .map_err(|e| anyhow::anyhow!("加载 ONNX 模型失败: {e}"))?;
+
+    let mf = stem_splitter_core::core::engine::manifest();
+    if mf.sample_rate != 44100 {
+        anyhow::bail!("模型要求 44.1kHz，manifest 里写的是 {}", mf.sample_rate);
+    }
+    let win = mf.window;
+    let hop = mf.hop;
+    if !(win > 0 && hop > 0 && hop <= win) {
+        anyhow::bail!("manifest 里的 window/hop 不合法: {win}/{hop}");
+    }
+    let names: Vec<String> = if mf.stems.is_empty() {
+        vec!["vocals".into(), "drums".into(), "bass".into(), "other".into()]
+    } else {
+        mf.stems.clone()
+    };
+    let idx_of = |key: &str, fallback: usize| -> usize {
+        names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(key))
+            .unwrap_or(fallback)
+    };
+    let (vi, di, bi, oi) = (
+        idx_of("vocals", 0),
+        idx_of("drums", 1),
+        idx_of("bass", 2),
+        idx_of("other", 3),
+    );
+
+    let (src_l, src_r) = to_stereo_f32(buf);
+    let n = src_l.len();
+
+    let mut out: [Vec<f32>; 4] = [
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    ];
+
+    let mut left = vec![0f32; win];
+    let mut right = vec![0f32; win];
+    let mut pos = 0usize;
+    while pos < n {
+        for i in 0..win {
+            let f = pos + i;
+            if f < n {
+                left[i] = src_l[f];
+                right[i] = src_r[f];
+            } else {
+                left[i] = 0.0;
+                right[i] = 0.0;
+            }
+        }
+
+        let window = stem_splitter_core::core::engine::run_window_demucs(&left, &right)
+            .map_err(|e| anyhow::anyhow!("推理失败: {e}"))?;
+        let t_out = window.shape()[2];
+        let copy = hop.min(t_out).min(n - pos);
+        for (dst, src_idx) in [(&mut out[0], vi), (&mut out[1], di), (&mut out[2], bi), (&mut out[3], oi)]
+        {
+            for i in 0..copy {
+                dst.push(window[(src_idx, 0, i)]);
+            }
+        }
+        pos += hop;
+    }
+
+    let mk = |s: Vec<f32>| AudioBuffer {
+        sample_rate: 44100,
+        bits_per_sample: 32,
+        data: vec![s.iter().map(|&x| x as f64).collect()],
+    };
+
+    let mut it = out.into_iter();
+    Ok(StemAudio {
+        vocals: mk(it.next().unwrap()),
+        drums: mk(it.next().unwrap()),
+        bass: mk(it.next().unwrap()),
+        other: mk(it.next().unwrap()),
+    })
 }
