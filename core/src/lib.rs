@@ -2,6 +2,7 @@
 pub mod dsp {
     pub mod biquad;
     pub mod delay;
+    pub mod resample;
     pub mod stft;
 }
 pub mod io {

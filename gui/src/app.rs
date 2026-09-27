@@ -901,38 +901,28 @@ fn run_one_auto(
     std::fs::create_dir_all(&tmp).ok();
     let track = input.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
 
-    let stems_dir = match find_stems(&tmp, track) {
-        Some(d) => d,
-        None => {
-            let mut cmd = std::process::Command::new("demucs");
-            cmd.arg("-n")
-                .arg(model)
-                .arg("-o")
-                .arg(&tmp)
-                .arg(input);
-            // 国内直连 huggingface.co 下不动模型，默认走镜像。
-            if std::env::var_os("HF_ENDPOINT").is_none() {
-                cmd.env("HF_ENDPOINT", "https://hf-mirror.com");
-            }
-            let status = cmd
-                .status()
-                .map_err(|e| format!("找不到 demucs（{e}）。请先 pip install demucs"))?;
-            if !status.success() {
-                return Err(
-                    "demucs 失败。如果一直在重试 huggingface.co，说明模型下不动——\
-                     已在代码里默认走 hf-mirror.com 镜像。"
-                        .to_string(),
-                );
-            }
-            find_stems(&tmp, track).ok_or_else(|| "没找到分离结果".to_string())?
-        }
-    };
+    let _ = tmp;
+    let _ = model;
 
-    let _ = tx.send(Msg::Stage("读取 stems 并路由 …".into()));
-    let vocals = upmix_core::fileio::read_any(&stems_dir.join("vocals.wav")).map_err(|e| e.to_string())?;
-    let drums = upmix_core::fileio::read_any(&stems_dir.join("drums.wav")).map_err(|e| e.to_string())?;
-    let bass = upmix_core::fileio::read_any(&stems_dir.join("bass.wav")).map_err(|e| e.to_string())?;
-    let other = upmix_core::fileio::read_any(&stems_dir.join("other.wav")).map_err(|e| e.to_string())?;
+    // 内置引擎：纯 Rust + ONNX Runtime，不需要 Python、不联网。
+    let _ = tx.send(Msg::Stage("读取音频 …".into()));
+    let src = upmix_core::fileio::read_any(input).map_err(|e| e.to_string())?;
+    if src.num_channels() < 2 {
+        return Err("auto 模式需要立体声输入".to_string());
+    }
+    let feed = if src.sample_rate == 44100 {
+        src
+    } else {
+        let _ = tx.send(Msg::Stage(format!(
+            "重采样 {} Hz -> 44100 Hz …",
+            src.sample_rate
+        )));
+        upmix_core::dsp::resample::resample(&src, 44100)
+    };
+    let _ = tx.send(Msg::Stage("内置分离（htdemucs，无 Python）…".into()));
+    let sep = upmix_core::builtin_sep::separate(&feed).map_err(|e| e.to_string())?;
+
+    let (vocals, drums, bass, other) = (sep.vocals, sep.drums, sep.bass, sep.other);
     let sr = vocals.sample_rate;
     let bits = vocals.bits_per_sample;
     let stems = upmix_core::auto::Stems {
@@ -952,8 +942,21 @@ fn run_one_auto(
     let out_path = out_path_for(input, outdir);
     prepare(&out_path);
     upmix_core::fileio::write_any(&out_path, &out, Some(input)).map_err(|e| e.to_string())?;
-    if !keep {
-        let _ = std::fs::remove_dir_all(&stems_dir);
+    // “保留 stems”：把四轨写一份出来，方便回看。
+    if keep {
+        let _ = std::fs::create_dir_all(&tmp);
+        for (n, b) in [
+            ("vocals", &stems.vocals),
+            ("drums", &stems.drums),
+            ("bass", &stems.bass),
+            ("other", &stems.other),
+        ] {
+            let _ = upmix_core::fileio::write_any(
+                &tmp.join(format!("{track}_{n}.wav")),
+                b,
+                None,
+            );
+        }
     }
     Ok(out_path)
 }
