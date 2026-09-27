@@ -397,38 +397,67 @@ fn demucs_separate_dir(cli: &Cli, input: &Path, tmp: &Path) -> Result<PathBuf> {
     find_stems_dir(tmp, input)
 }
 
+/// 读文件的采样率，纯 Rust（FLAC 用 claxon、WAV 用 hound），不依赖 ffprobe。
 fn probe_sample_rate(path: &Path) -> Option<u32> {
-    let out = Command::new("ffprobe")
-        .args([
-            "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate",
-            "-of", "default=nw=1:nk=1",
-        ])
-        .arg(path)
-        .output()
-        .ok()?;
-    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
+    match ext_of(path).as_str() {
+        "wav" | "wave" => hound::WavReader::open(path).ok().map(|r| r.spec().sample_rate),
+        "flac" => claxon::FlacReader::open(path)
+            .ok()
+            .map(|r| r.streaminfo().sample_rate),
+        _ => None,
+    }
 }
 
+/// 纯 Rust 重采样（Blackman 窗 sinc 插值），不依赖 ffmpeg。
 fn resample(buf: &AudioBuffer, target_sr: u32) -> Result<AudioBuffer> {
-    let tmp = std::env::temp_dir();
-    let pid = std::process::id();
-    let inp = tmp.join(format!("upmix-rs-in-{pid}.wav"));
-    let outp = tmp.join(format!("upmix-rs-out-{pid}.wav"));
-    wav::write(&inp, buf)?;
-    let status = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(&inp)
-        .args(["-ar", &target_sr.to_string(), "-c:a", "pcm_s24le"])
-        .arg(&outp)
-        .status()
-        .context("running ffmpeg for resample")?;
-    if !status.success() {
-        bail!("ffmpeg resample failed");
+    let src_sr = buf.sample_rate;
+    if src_sr == target_sr || src_sr == 0 || buf.data.is_empty() {
+        return Ok(buf.clone());
     }
-    let out = wav::read(&outp)?;
-    let _ = std::fs::remove_file(inp);
-    let _ = std::fs::remove_file(outp);
-    Ok(out)
+    let ratio = target_sr as f64 / src_sr as f64;
+    let frames_in = buf.data[0].len();
+    if frames_in == 0 {
+        return Ok(buf.clone());
+    }
+    let frames_out = ((frames_in as f64) * ratio).round() as usize;
+    // 降采样时把 sinc 截止频率压到目标奈奎斯特，避免混叠。
+    let cutoff = ratio.min(1.0);
+    let taps: i64 = 16;
+
+    let mut data = Vec::with_capacity(buf.num_channels());
+    for ch in &buf.data {
+        let mut out = Vec::with_capacity(frames_out);
+        for i in 0..frames_out {
+            let center = i as f64 / ratio;
+            let first = center.floor() as i64 - taps / 2;
+            let mut acc = 0.0f64;
+            let mut norm = 0.0f64;
+            for k in 0..taps {
+                let idx = first + k;
+                if idx < 0 || idx as usize >= frames_in {
+                    continue;
+                }
+                let dist = center - idx as f64;
+                let x = std::f64::consts::PI * dist * cutoff;
+                let sinc = if x.abs() < 1e-9 { 1.0 } else { x.sin() / x };
+                // Blackman 窗
+                let wp = (k as f64 / (taps - 1) as f64) * 2.0 - 1.0;
+                let w = 0.42
+                    + 0.5 * (std::f64::consts::PI * wp).cos()
+                    + 0.08 * (2.0 * std::f64::consts::PI * wp).cos();
+                let h = sinc * w * cutoff;
+                acc += ch[idx as usize] * h;
+                norm += h;
+            }
+            out.push(if norm.abs() > 1e-12 { acc / norm } else { acc });
+        }
+        data.push(out);
+    }
+    Ok(AudioBuffer {
+        sample_rate: target_sr,
+        bits_per_sample: buf.bits_per_sample,
+        data,
+    })
 }
 
 fn report(out_path: &Path, out: &AudioBuffer, t0: Instant) {

@@ -13,7 +13,8 @@ on:
 
 jobs:
   linux:
-    runs-on: ubuntu-22.04
+    # ONNX Runtime 的静态库需要较新的 glibc（__isoc23_* 符号），22.04 链不上。
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +41,8 @@ jobs:
             target/release/upmix-tui
 
   windows:
-    runs-on: ubuntu-22.04
+    # 同上：宿主编译也走 24.04。
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
