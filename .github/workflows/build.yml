@@ -32,6 +32,15 @@ jobs:
       - name: 构建
         run: cargo build --release
 
+      - name: 取静态 ffmpeg（随包分发，用户不用自己装）
+        run: |
+          curl -sL --retry 3 -o ffmpeg.tar.xz \
+            https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar xf ffmpeg.tar.xz
+          cp ffmpeg-*-static/ffmpeg dist-ffmpeg
+          strip dist-ffmpeg || true
+          ./dist-ffmpeg -version | head -1
+
       - uses: actions/upload-artifact@v4
         with:
           name: upmix-linux
@@ -39,29 +48,36 @@ jobs:
             target/release/upmix-gui
             target/release/upmix-core
             target/release/upmix-tui
+            dist-ffmpeg
 
   windows:
-    # 同上：宿主编译也走 24.04。
-    runs-on: ubuntu-24.04
+    # ort 没有 x86_64-pc-windows-gnu 的预编译库，必须用 MSVC 原生构建。
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu
-
-      - name: 安装 mingw-w64
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: 交叉构建
-        run: cargo build --release --target x86_64-pc-windows-gnu
+      - name: 构建
+        run: cargo build --release
+
+      - name: 取静态 ffmpeg（随包分发）
+        shell: pwsh
+        run: |
+          $u = "https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip"
+          curl.exe -sL --retry 3 -o ff.zip $u
+          Expand-Archive ff.zip -DestinationPath ff
+          Copy-Item (Get-ChildItem -Recurse ff -Filter ffmpeg.exe | Select-Object -First 1).FullName ffmpeg.exe
+          .\ffmpeg.exe -version | Select-Object -First 1
 
       - uses: actions/upload-artifact@v4
         with:
           name: upmix-windows
-          path: target/x86_64-pc-windows-gnu/release/*.exe
+          path: |
+            target/release/*.exe
+            ffmpeg.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -72,10 +88,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
 
-      - name: 打包
+      - name: 打包（二进制 + 自带 ffmpeg）
         run: |
-          cd upmix-linux && tar czf ../upmix-core-linux-x86_64.tar.gz upmix-gui upmix-core upmix-tui && cd ..
-          cd upmix-windows && zip -j ../upmix-core-windows-x86_64.zip *.exe && cd ..
+          chmod +x upmix-linux/dist-ffmpeg
+          mv upmix-linux/dist-ffmpeg upmix-linux/ffmpeg
+          chmod +x upmix-linux/upmix-gui upmix-linux/upmix-core upmix-linux/upmix-tui
+          (cd upmix-linux && tar czf ../upmix-core-linux-x86_64.tar.gz upmix-gui upmix-core upmix-tui ffmpeg)
+          (cd upmix-windows && zip -j ../upmix-core-windows-x86_64.zip *.exe)
           ls -la *.tar.gz *.zip
 
       - uses: softprops/action-gh-release@v2
