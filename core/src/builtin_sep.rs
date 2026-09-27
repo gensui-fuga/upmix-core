@@ -49,8 +49,7 @@ fn model_dir() -> Option<PathBuf> {
 /// 从本地目录装配一个 ModelHandle（manifest + onnx）。
 fn local_handle(dir: &Path) -> Option<stem_splitter_core::model::model_manager::ModelHandle> {
     let manifest_txt = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
-    let manifest: stem_splitter_core::types::ModelManifest =
-        serde_json::from_str(&manifest_txt).ok()?;
+    let manifest: stem_splitter_core::ModelManifest = serde_json::from_str(&manifest_txt).ok()?;
     let onnx = std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -148,10 +147,9 @@ pub fn separate(buf: &AudioBuffer) -> Result<StemAudio> {
             .map_err(|e| anyhow::anyhow!("推理失败: {e}"))?;
         let t_out = window.shape()[2];
         let copy = hop.min(t_out).min(n - pos);
-        for (dst, src_idx) in [(&mut out[0], vi), (&mut out[1], di), (&mut out[2], bi), (&mut out[3], oi)]
-        {
+        for (k, src_idx) in [vi, di, bi, oi].iter().enumerate() {
             for i in 0..copy {
-                dst.push(window[(src_idx, 0, i)]);
+                out[k].push(window[(*src_idx, 0, i)]);
             }
         }
         pos += hop;
