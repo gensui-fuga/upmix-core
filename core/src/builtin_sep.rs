@@ -50,18 +50,21 @@ fn model_dir() -> Option<PathBuf> {
 fn local_handle(dir: &Path) -> Option<stem_splitter_core::model::model_manager::ModelHandle> {
     let manifest_txt = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
     let manifest: stem_splitter_core::ModelManifest = serde_json::from_str(&manifest_txt).ok()?;
-    let onnx = std::fs::read_dir(dir)
+    // 模型文件可能是 .ort 也可能是 .onnx，一律取 manifest.json 之外的那个。
+    let model_file = std::fs::read_dir(dir)
         .ok()?
         .flatten()
         .map(|e| e.path())
         .find(|p| {
-            p.extension()
-                .map(|x| x.eq_ignore_ascii_case("onnx"))
-                .unwrap_or(false)
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| !n.eq_ignore_ascii_case("manifest.json"))
+                    .unwrap_or(false)
         })?;
     Some(stem_splitter_core::model::model_manager::ModelHandle {
         manifest,
-        local_path: onnx,
+        local_path: model_file,
     })
 }
 
