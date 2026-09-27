@@ -90,12 +90,23 @@ jobs:
 
       - name: 打包（二进制 + 自带 ffmpeg）
         run: |
-          chmod +x upmix-linux/dist-ffmpeg
-          mv upmix-linux/dist-ffmpeg upmix-linux/ffmpeg
-          chmod +x upmix-linux/upmix-gui upmix-linux/upmix-core upmix-linux/upmix-tui
-          (cd upmix-linux && tar czf ../upmix-core-linux-x86_64.tar.gz upmix-gui upmix-core upmix-tui ffmpeg)
-          (cd upmix-windows && zip -j ../upmix-core-windows-x86_64.zip *.exe)
-          ls -la *.tar.gz *.zip
+          set -eux
+          # download-artifact 会保留上传时的目录结构，用 find 定位，不猜路径。
+          GUI=$(find upmix-linux -type f -name upmix-gui | head -1)
+          CORE=$(find upmix-linux -type f -name upmix-core | head -1)
+          TUI=$(find upmix-linux -type f -name upmix-tui | head -1)
+          LFF=$(find upmix-linux -type f -name 'ffmpeg*' | head -1)
+          chmod +x "$GUI" "$CORE" "$TUI" "$LFF"
+          LDIR=$(dirname "$GUI")
+          cp "$LFF" "$LDIR/ffmpeg"
+          (cd "$LDIR" && tar czf "$GITHUB_WORKSPACE/upmix-core-linux-x86_64.tar.gz" \
+             upmix-gui upmix-core upmix-tui ffmpeg)
+
+          WEXES=$(find upmix-windows -type f -name '*.exe')
+          WFF=$(find upmix-windows -type f -name 'ffmpeg.exe' | head -1)
+          WDIR=$(dirname "$(find upmix-windows -type f -name upmix-gui.exe | head -1)")
+          (cd "$WDIR" && zip -j "$GITHUB_WORKSPACE/upmix-core-windows-x86_64.zip" *.exe)
+          ls -la "$GITHUB_WORKSPACE"/*.tar.gz "$GITHUB_WORKSPACE"/*.zip
 
       - uses: softprops/action-gh-release@v2
         with:
