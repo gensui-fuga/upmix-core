@@ -16,6 +16,10 @@ rustfft = "6.4.1"
 claxon = "0.4.3"
 hound = "3.5.1"
 flacenc = "0.5.1"
+# 纯 Rust + ONNX Runtime 的源分离，替掉外挂的 Python demucs。
+# default-features 默认带 cuda/coreml/directml/onednn/xnnpack，编译重且要额外的运行库，
+# 这里只要 CPU 推理，保证“解压即用”。
+stem-splitter-core = { version = "1.2", default-features = false }
 
 # Local patch of flacenc 0.5.1: the upstream crate can emit multi-GB frames on
 # 24-bit signal->silence transitions (flacenc-rs issue #256). The pure-Rust

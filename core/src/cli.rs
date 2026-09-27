@@ -40,9 +40,13 @@ pub struct Cli {
     #[arg(long, default_value = "fast")]
     pub mode: String,
 
-    /// Path to the `demucs` executable (auto mode).
+    /// Path to the `demucs` executable (only with --external-demucs).
     #[arg(long, default_value = "demucs")]
     pub demucs: String,
+
+    /// 用外挂的 Python demucs 而不是内置引擎（需要自己装 demucs）。
+    #[arg(long)]
+    pub external_demucs: bool,
 
     /// Demucs model name (auto mode).
     #[arg(long, default_value = "htdemucs")]
@@ -257,52 +261,52 @@ fn run_auto(cli: &Cli, input: &Path, out_path: &Path, verbose: bool, t0: Instant
         .unwrap_or_else(|| std::env::temp_dir().join(format!("upmix-stems-{}", std::process::id())));
     std::fs::create_dir_all(&tmp).ok();
 
-    let stems_dir = match find_stems_dir(&tmp, input).ok().filter(|d| d.join("vocals.wav").exists()) {
-        Some(dir) => {
-            if !cli.quiet {
-                eprintln!("[auto] reusing cached stems in {}", dir.display());
-            }
-            dir
+    // 默认走内置引擎（纯 Rust + ONNX Runtime），不依赖 Python / pip。
+    // 想用外挂的 demucs 就加 --external-demucs。
+    let wanted = if cli.external_demucs {
+        if !cli.quiet {
+            eprintln!("[auto] separating stems with external demucs '{}' …", cli.model);
         }
-        None => {
-            if !cli.quiet {
-                eprintln!("[auto] separating stems with demucs model '{}' …", cli.model);
-            }
-            let mut cmd = Command::new(&cli.demucs);
-            cmd.arg("-n").arg(&cli.model).arg("-o").arg(&tmp);
-            // 国内直连 huggingface.co 基本下不动模型（会一直在 Retry），默认走镜像。
-            // 想换源自己设 HF_ENDPOINT 就行。
-            if std::env::var_os("HF_ENDPOINT").is_none() {
-                cmd.env("HF_ENDPOINT", "https://hf-mirror.com");
-            }
-            if std::env::var_os("HF_HUB_DISABLE_TELEMETRY").is_none() {
-                cmd.env("HF_HUB_DISABLE_TELEMETRY", "1");
-            }
-            if let Some(j) = cli.jobs {
-                cmd.arg("-j").arg(j.to_string());
-            }
-            let status = cmd
-                .arg(input)
-                .status()
-                .with_context(|| format!(
-                    "could not run '{}'. auto mode needs demucs installed (pip install demucs)",
-                    cli.demucs
-                ))?;
-            if !status.success() {
-                bail!(
-                    "demucs exited with {status}. If it kept retrying huggingface.co, that host is \
-                     unreachable here — set HF_ENDPOINT=https://hf-mirror.com (this build already \
-                     does that by default) or download the model manually."
-                );
-            }
-            find_stems_dir(&tmp, input)?
+        Some(demucs_separate_dir(cli, input, &tmp)?)
+    } else {
+        if !cli.quiet {
+            eprintln!("[auto] separating with the built-in engine (htdemucs, no Python) …");
         }
+        None
     };
 
-    let vocals = wav::read(&stems_dir.join("vocals.wav"))?;
-    let drums = wav::read(&stems_dir.join("drums.wav"))?;
-    let bass = wav::read(&stems_dir.join("bass.wav"))?;
-    let other = wav::read(&stems_dir.join("other.wav"))?;
+    let (vocals, drums, bass, other) = match wanted {
+        Some(dir) => (
+            wav::read(&dir.join("vocals.wav"))?,
+            wav::read(&dir.join("drums.wav"))?,
+            wav::read(&dir.join("bass.wav"))?,
+            wav::read(&dir.join("other.wav"))?,
+        ),
+        None => {
+            // 内置模型固定按 44.1k 训练：源不是 44.1k 就先重采样，写个临时 WAV 喂进去。
+            let feed = {
+                let src = crate::fileio::read_any(input)?;
+                if src.sample_rate == 44100 {
+                    input.to_path_buf()
+                } else {
+                    if !cli.quiet {
+                        eprintln!("[auto] resampling {} Hz -> 44100 Hz for the model", src.sample_rate);
+                    }
+                    let rs = resample(&src, 44100)?;
+                    let p = tmp.join("builtin-in-44k.wav");
+                    wav::write(&p, &rs)?;
+                    p
+                }
+            };
+            let s = crate::builtin_sep::separate(&feed, &tmp.join("builtin"))?;
+            (
+                wav::read(&s.vocals)?,
+                wav::read(&s.drums)?,
+                wav::read(&s.bass)?,
+                wav::read(&s.other)?,
+            )
+        }
+    };
     let stem_sr = vocals.sample_rate;
     let bits = vocals.bits_per_sample;
     let src_sr = probe_sample_rate(input).unwrap_or(stem_sr);
@@ -358,6 +362,39 @@ fn find_stems_dir(root: &Path, input: &Path) -> Result<PathBuf> {
         None
     }
     walk(root, track).with_context(|| format!("no stems found under {}", root.display()))
+}
+
+/// 外挂 demucs 的分支（只有 --external-demucs 时才走）。
+fn demucs_separate_dir(cli: &Cli, input: &Path, tmp: &Path) -> Result<PathBuf> {
+    if let Some(dir) = find_stems_dir(tmp, input)
+        .ok()
+        .filter(|d| d.join("vocals.wav").exists())
+    {
+        if !cli.quiet {
+            eprintln!("[auto] reusing cached stems in {}", dir.display());
+        }
+        return Ok(dir);
+    }
+    let mut cmd = Command::new(&cli.demucs);
+    cmd.arg("-n").arg(&cli.model).arg("-o").arg(tmp);
+    // 国内直连 huggingface.co 基本下不动模型（会一直在 Retry），默认走镜像。
+    if std::env::var_os("HF_ENDPOINT").is_none() {
+        cmd.env("HF_ENDPOINT", "https://hf-mirror.com");
+    }
+    if std::env::var_os("HF_HUB_DISABLE_TELEMETRY").is_none() {
+        cmd.env("HF_HUB_DISABLE_TELEMETRY", "1");
+    }
+    if let Some(j) = cli.jobs {
+        cmd.arg("-j").arg(j.to_string());
+    }
+    let status = cmd
+        .arg(input)
+        .status()
+        .with_context(|| format!("could not run '{}' (pip install demucs)", cli.demucs))?;
+    if !status.success() {
+        bail!("demucs exited with {status}");
+    }
+    find_stems_dir(tmp, input)
 }
 
 fn probe_sample_rate(path: &Path) -> Option<u32> {

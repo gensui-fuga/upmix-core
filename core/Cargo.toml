@@ -17,3 +17,4 @@ claxon.workspace = true
 hound.workspace = true
 flacenc.workspace = true
 rayon = "1.10"
+stem-splitter-core.workspace = true

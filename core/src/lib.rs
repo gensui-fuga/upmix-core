@@ -11,6 +11,7 @@ pub mod io {
 }
 pub mod upmix;
 pub mod auto;
+pub mod builtin_sep;
 pub mod metadata;
 pub mod cli;
 
