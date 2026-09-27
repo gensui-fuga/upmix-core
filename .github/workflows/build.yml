@@ -35,9 +35,14 @@ jobs:
       - name: 取静态 ffmpeg（随包分发，用户不用自己装）
         run: |
           set -eux
-          # johnvansickle 那个源经常挂，用 GitHub 上的 BtbN 构建。
-          curl -sL --retry 3 -o ff.tar.xz \
-            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          # GitHub release 偶尔限流，重试 + 校验到的东西真是 xz 为止。
+          URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          for i in 1 2 3 4 5; do
+            curl -sL --retry 3 --retry-all-errors -o ff.tar.xz "$URL" || true
+            if xz -t ff.tar.xz 2>/dev/null; then break; fi
+            echo "attempt $i got a bad archive, retrying"; sleep 10
+          done
+          xz -t ff.tar.xz
           tar xf ff.tar.xz
           FF=$(find . -maxdepth 3 -type f -name ffmpeg | head -1)
           test -n "$FF"
@@ -78,8 +83,10 @@ jobs:
         shell: pwsh
         run: |
           $u = "https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip"
-          curl.exe -sL --retry 3 -o ff.zip $u
-          Expand-Archive ff.zip -DestinationPath ff
+          for ($i = 1; $i -le 5; $i++) {
+            curl.exe -sL --retry 3 -o ff.zip $u
+            try { Expand-Archive ff.zip -DestinationPath ff -Force; break } catch { Write-Host "attempt $i failed, retry"; Start-Sleep 10 }
+          }
           Copy-Item (Get-ChildItem -Recurse ff -Filter ffmpeg.exe | Select-Object -First 1).FullName ffmpeg.exe
           .\ffmpeg.exe -version | Select-Object -First 1
 
