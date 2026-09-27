@@ -270,15 +270,30 @@ fn run_auto(cli: &Cli, input: &Path, out_path: &Path, verbose: bool, t0: Instant
             }
             let mut cmd = Command::new(&cli.demucs);
             cmd.arg("-n").arg(&cli.model).arg("-o").arg(&tmp);
+            // 国内直连 huggingface.co 基本下不动模型（会一直在 Retry），默认走镜像。
+            // 想换源自己设 HF_ENDPOINT 就行。
+            if std::env::var_os("HF_ENDPOINT").is_none() {
+                cmd.env("HF_ENDPOINT", "https://hf-mirror.com");
+            }
+            if std::env::var_os("HF_HUB_DISABLE_TELEMETRY").is_none() {
+                cmd.env("HF_HUB_DISABLE_TELEMETRY", "1");
+            }
             if let Some(j) = cli.jobs {
                 cmd.arg("-j").arg(j.to_string());
             }
             let status = cmd
                 .arg(input)
                 .status()
-                .with_context(|| format!("running '{}' (is demucs installed?)", cli.demucs))?;
+                .with_context(|| format!(
+                    "could not run '{}'. auto mode needs demucs installed (pip install demucs)",
+                    cli.demucs
+                ))?;
             if !status.success() {
-                bail!("demucs exited with {status}");
+                bail!(
+                    "demucs exited with {status}. If it kept retrying huggingface.co, that host is \
+                     unreachable here — set HF_ENDPOINT=https://hf-mirror.com (this build already \
+                     does that by default) or download the model manually."
+                );
             }
             find_stems_dir(&tmp, input)?
         }

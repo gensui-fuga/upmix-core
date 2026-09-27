@@ -879,16 +879,25 @@ fn run_one_auto(
     let stems_dir = match find_stems(&tmp, track) {
         Some(d) => d,
         None => {
-            let status = std::process::Command::new("demucs")
-                .arg("-n")
+            let mut cmd = std::process::Command::new("demucs");
+            cmd.arg("-n")
                 .arg(model)
                 .arg("-o")
                 .arg(&tmp)
-                .arg(input)
+                .arg(input);
+            // 国内直连 huggingface.co 下不动模型，默认走镜像。
+            if std::env::var_os("HF_ENDPOINT").is_none() {
+                cmd.env("HF_ENDPOINT", "https://hf-mirror.com");
+            }
+            let status = cmd
                 .status()
                 .map_err(|e| format!("找不到 demucs（{e}）。请先 pip install demucs"))?;
             if !status.success() {
-                return Err(format!("demucs 退出码 {status}"));
+                return Err(
+                    "demucs 失败。如果一直在重试 huggingface.co，说明模型下不动——\
+                     已在代码里默认走 hf-mirror.com 镜像。"
+                        .to_string(),
+                );
             }
             find_stems(&tmp, track).ok_or_else(|| "没找到分离结果".to_string())?
         }
