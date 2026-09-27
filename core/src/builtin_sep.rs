@@ -20,7 +20,7 @@ pub struct StemAudio {
 
 /// 把模型（manifest.json + *.onnx）拉到 `out_dir`，打包时用。
 pub fn prepare_model(out_dir: &Path) -> Result<()> {
-    let handle = stem_splitter_core::model::model_manager::ensure_model("htdemucs", None)
+    let handle = stem_splitter_core::model::model_manager::ensure_model("htdemucs_ort_v1", None)
         .map_err(|e| anyhow::anyhow!("下载模型失败: {e}"))?;
     std::fs::create_dir_all(out_dir)?;
     let name = handle
