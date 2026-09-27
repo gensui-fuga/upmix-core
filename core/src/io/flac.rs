@@ -100,6 +100,16 @@ fn write_cli(path: &Path, buf: &AudioBuffer) -> Result<()> {
 /// cover art — into the output; the channel-layout tag is added on top.
 pub fn write(path: &Path, buf: &AudioBuffer, source: Option<&Path>) -> Result<()> {
     buf.validate()?;
+    // FLAC 的常见实现只稳到 24bit：32bit（尤其是浮点 WAV 源）先降到 24 再编。
+    let lowered;
+    let buf = if buf.bits_per_sample > 24 {
+        let mut b = buf.clone();
+        b.bits_per_sample = 24;
+        lowered = b;
+        &lowered
+    } else {
+        buf
+    };
     let mut encoded = false;
     if flac_cli_available() {
         match write_cli(path, buf) {

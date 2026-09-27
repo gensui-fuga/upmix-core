@@ -910,21 +910,30 @@ fn run_one_auto(
     if src.num_channels() < 2 {
         return Err("auto 模式需要立体声输入".to_string());
     }
-    let feed = if src.sample_rate == 44100 {
+    let src_bits = src.bits_per_sample;
+    let src_sr = src.sample_rate;
+    let feed = if src_sr == 44100 {
         src
     } else {
-        let _ = tx.send(Msg::Stage(format!(
-            "重采样 {} Hz -> 44100 Hz …",
-            src.sample_rate
-        )));
+        let _ = tx.send(Msg::Stage(format!("重采样 {} Hz -> 44100 Hz …", src_sr)));
         upmix_core::dsp::resample::resample(&src, 44100)
     };
     let _ = tx.send(Msg::Stage("内置分离（htdemucs，无 Python）…".into()));
     let sep = upmix_core::builtin_sep::separate(&feed).map_err(|e| e.to_string())?;
 
-    let (vocals, drums, bass, other) = (sep.vocals, sep.drums, sep.bass, sep.other);
-    let sr = vocals.sample_rate;
-    let bits = vocals.bits_per_sample;
+    // 模型内部固定 44.1k/32bit：采样率重采样回源，位深标回源。
+    let tag = |mut b: upmix_core::io::pcm::AudioBuffer| {
+        b.bits_per_sample = src_bits;
+        b
+    };
+    let (vocals, drums, bass, other) = (
+        tag(sep.vocals),
+        tag(sep.drums),
+        tag(sep.bass),
+        tag(sep.other),
+    );
+    let bits = src_bits;
+    let sr = 44100;
     let stems = upmix_core::auto::Stems {
         sample_rate: sr,
         bits_per_sample: bits,
@@ -935,6 +944,11 @@ fn run_one_auto(
     };
     let mut out = upmix_core::auto::route(&stems, &upmix_core::auto::StemRouting::default())
         .map_err(|e| e.to_string())?;
+    // 模型出来是 44.1k，重采样回源采样率，保住高采样的源。
+    if src_sr != sr {
+        let _ = tx.send(Msg::Stage(format!("重采样 {} Hz -> {} Hz …", sr, src_sr)));
+        out = upmix_core::dsp::resample::resample(&out, src_sr);
+    }
     let peak = out.peak();
     if peak > 1.0 {
         out.apply_gain(1.0 / peak);

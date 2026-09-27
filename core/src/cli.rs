@@ -301,6 +301,7 @@ fn run_auto(cli: &Cli, input: &Path, out_path: &Path, verbose: bool, t0: Instant
         None => {
             // 内置离线引擎：读进来、非 44.1k 就先重采样，直接跑模型（不联网、不经文件）。
             let src = crate::fileio::read_any(input)?;
+            let src_bits = src.bits_per_sample;
             let feed = if src.sample_rate == 44100 {
                 src
             } else {
@@ -313,7 +314,13 @@ fn run_auto(cli: &Cli, input: &Path, out_path: &Path, verbose: bool, t0: Instant
                 bail!("input must be stereo for auto mode");
             }
             let s = crate::builtin_sep::separate(&feed)?;
-            (s.vocals, s.drums, s.bass, s.other)
+            // 模型内部固定 44.1k/32bit。把“位深”标回源值，采样率后面再重采样回源；
+            // 否则 24bit/192k 的原文件会被降成 32bit/44.1k。
+            let tag = |mut b: AudioBuffer| {
+                b.bits_per_sample = src_bits;
+                b
+            };
+            (tag(s.vocals), tag(s.drums), tag(s.bass), tag(s.other))
         }
     };
     let stem_sr = vocals.sample_rate;
