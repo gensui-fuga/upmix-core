@@ -34,11 +34,15 @@ jobs:
 
       - name: 取静态 ffmpeg（随包分发，用户不用自己装）
         run: |
-          curl -sL --retry 3 -o ffmpeg.tar.xz \
-            https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
-          tar xf ffmpeg.tar.xz
-          cp ffmpeg-*-static/ffmpeg dist-ffmpeg
-          strip dist-ffmpeg || true
+          set -eux
+          # johnvansickle 那个源经常挂，用 GitHub 上的 BtbN 构建。
+          curl -sL --retry 3 -o ff.tar.xz \
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          tar xf ff.tar.xz
+          FF=$(find . -maxdepth 3 -type f -name ffmpeg | head -1)
+          test -n "$FF"
+          cp "$FF" dist-ffmpeg
+          chmod +x dist-ffmpeg
           ./dist-ffmpeg -version | head -1
 
       - uses: actions/upload-artifact@v4
@@ -95,7 +99,8 @@ jobs:
           GUI=$(find upmix-linux -type f -name upmix-gui | head -1)
           CORE=$(find upmix-linux -type f -name upmix-core | head -1)
           TUI=$(find upmix-linux -type f -name upmix-tui | head -1)
-          LFF=$(find upmix-linux -type f -name 'ffmpeg*' | head -1)
+          LFF=$(find upmix-linux -type f -name 'ffmpeg' -o -type f -name 'dist-ffmpeg' -o -type f -name 'ffmpeg-*' | head -1)
+          test -n "$GUI" && test -n "$LFF"
           chmod +x "$GUI" "$CORE" "$TUI" "$LFF"
           LDIR=$(dirname "$GUI")
           cp "$LFF" "$LDIR/ffmpeg"
