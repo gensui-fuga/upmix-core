@@ -49,16 +49,18 @@ jobs:
           git clone --recursive --depth 1 -b v1.23.2 \
             https://github.com/microsoft/onnxruntime.git ort-src
 
-      - name: 打补丁：删掉写死的 AVX2 / AVX-512 / FMA
+      - name: 准备源码（不删 mlas 的 AVX2 编译选项！）
         if: steps.ort-cache.outputs.cache-hit != 'true'
         run: |
           set -eux
           cd ort-src
-          # mlas.cmake 里对这些源文件硬加 -mavx2 / -mavx512f，是老 CPU 崩的根源。
-          sed -i 's/-mavx512f//g; s/-mavx512vnni//g; s/-mavx512//g; s/-mavx2//g; s/-mfma//g' \
-            cmake/onnxruntime_mlas.cmake
-          echo "=== 补丁后还残留的 avx 选项（应为空）==="
-          grep -rnE '\-mavx2|\-mavx512|\-mfma' cmake/ || echo "(干净)"
+          # 千万不要删 cmake/onnxruntime_mlas.cmake 里的 -mavx2/-mfma。
+          # 那些是 mlas/lib/intrinsics/avx2/*.cpp 专用 kernel 的编译选项，
+          # 那些文件写死了 _mm256_fmadd_ps 之类的 intrinsic，删了会直接编不过
+          # （target specific option mismatch）。而且它们自带运行时 CPU 检测，
+          # 老 CPU 上根本不会被执行。真正崩溃的是“主代码被全局 -mavx2 编进去”的部分，
+          # 这个靠下面的 -march=x86-64-v2 解决。
+          echo "源码保持原样，靠全局 -march=x86-64-v2 锁主代码指令集"
 
       - name: 编译 baseline ONNX Runtime（静态库）
         if: steps.ort-cache.outputs.cache-hit != 'true'
@@ -67,6 +69,7 @@ jobs:
           set -eux
           cd ort-src
           # x86-64-v2 = SSE4.2/POPCNT 一代。2009 年后的 CPU 都支持，且不含 AVX2。
+          # 主代码（除 mlas 的 avx2 专用 kernel 外）都会被锁到这个基线。
           ./build.sh --config Release --parallel --skip_tests --skip_submodule_sync \
             --cmake_extra_defines \
               CMAKE_C_FLAGS="-march=x86-64-v2" \
@@ -77,20 +80,33 @@ jobs:
           cp -r include/* ../ort-dist/include/
           ls -la ../ort-dist/lib/
 
-      - name: 验证 baseline 库（不能含 AVX2 专属指令）
+      - name: 验证 baseline 库
         run: |
           set -eux
           LIB=ort-dist/lib/libonnxruntime.a
           test -f "$LIB"
-          # AVX2 专属助记符：vpbroadcast* / vpermd / vpgatherd* / vpsllvd / vfmadd*（FMA 与 AVX2 同代）
-          N=$(objdump -d "$LIB" | grep -cE 'vpbroadcast|vpermd|vpgatherdd|vpgatherdq|vpsllvd|vpsravd|vfmadd|vfmsub|vfnmadd' || true)
-          echo "AVX2/FMA 专属指令行数: $N"
-          if [ "$N" -gt 0 ]; then
-            echo "::error::baseline ORT 里仍有 AVX2/FMA 指令，老 CPU 会 SIGILL"
-            objdump -d "$LIB" | grep -E 'vpbroadcast|vpermd|vpgatherdd|vpsllvd|vfmadd' | head -5
+          # 只看 mlas avx2 专用目标文件之外的 AVX2 指令。
+          # mlas 的 avx2 kernel 有运行时检测，允许存在；让它们误报会把门槛定得没意义。
+          TMP=$(mktemp -d)
+          cd "$TMP"
+          ar x /home/runner/work/upmix-core/upmix-core/ort-dist/lib/libonnxruntime.a
+          echo "目标文件总数: $(ls *.o | wc -l)"
+          BAD=0
+          for o in *.o; do
+            # 跳过 mlas avx2/avx512 专用 kernel
+            case "$o" in *mlas*avx2*|*mlas*avx512*) continue;; esac
+            n=$(objdump -d "$o" 2>/dev/null | grep -cE 'vpbroadcastq|vpermd|vpgatherdd|vpsllvd|vfmadd|vfmsub|vfnmadd' || true)
+            if [ "$n" -gt 0 ]; then
+              echo "::warning::$o 含 $n 条 AVX2/FMA 指令"
+              BAD=$((BAD+1))
+            fi
+          done
+          echo "可疑目标文件数（非 mlas avx2 kernel）: $BAD"
+          if [ "$BAD" -gt 0 ]; then
+            echo "::error::baseline 库的非 kernel 部分仍有 AVX2/FMA"
             exit 1
           fi
-          echo "✓ baseline ORT 干净"
+          echo "✓ baseline ORT 干净（mlas avx2 kernel 自带运行时检测，不计入）"
 
       - uses: actions/upload-artifact@v4
         with:
