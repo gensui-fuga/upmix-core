@@ -7,12 +7,98 @@ name: build
 
 on:
   push:
-    branches: [master]
+    branches: [master, legacy-cpu]
     tags: ["v*"]
   workflow_dispatch:
 
+# =====================================================================
+# legacy-cpu 分支：给 2012 年前后的老 CPU（Ivy Bridge / Sandy Bridge）用。
+#
+# 背景：ONNX Runtime 的官方预编译库是拿 -mavx2 编的，老 CPU 一进推理就
+# SIGILL（实测崩在 vpbroadcastq %xmm0,%ymm0 这条 AVX2 指令上）。
+# 换任何官方版本都没用（1.9 起就要求 AVX2），所以这里自己编一份。
+#
+# 做法：云端克隆 ORT 源码，把 CMake 里写死的 -mavx2/-mavx512f/-mfma 全删掉，
+# 全局锁 -march=x86-64-v2（SSE4.2 一代，不含 AVX2），编出 baseline 静态库，
+# 再用 ORT_LIB_LOCATION 喂给 ort-sys，最后验一遍产物里没有 AVX2 专属指令。
+# =====================================================================
+
 jobs:
+  ort-baseline:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存 baseline ORT
+        id: ort-cache
+        uses: actions/cache@v4
+        with:
+          path: ort-dist
+          key: ort-baseline-1.23.2-v2
+
+      - name: 安装构建依赖
+        if: steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc g++ python3-dev
+
+      - name: 克隆 ONNX Runtime 源码
+        if: steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          git clone --recursive --depth 1 -b v1.23.2 \
+            https://github.com/microsoft/onnxruntime.git ort-src
+
+      - name: 打补丁：删掉写死的 AVX2 / AVX-512 / FMA
+        if: steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          cd ort-src
+          # mlas.cmake 里对这些源文件硬加 -mavx2 / -mavx512f，是老 CPU 崩的根源。
+          sed -i 's/-mavx512f//g; s/-mavx512vnni//g; s/-mavx512//g; s/-mavx2//g; s/-mfma//g' \
+            cmake/onnxruntime_mlas.cmake
+          echo "=== 补丁后还残留的 avx 选项（应为空）==="
+          grep -rnE '\-mavx2|\-mavx512|\-mfma' cmake/ || echo "(干净)"
+
+      - name: 编译 baseline ONNX Runtime（静态库）
+        if: steps.ort-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 90
+        run: |
+          set -eux
+          cd ort-src
+          # x86-64-v2 = SSE4.2/POPCNT 一代。2009 年后的 CPU 都支持，且不含 AVX2。
+          ./build.sh --config Release --parallel --skip_tests --skip_submodule_sync \
+            --cmake_extra_defines \
+              CMAKE_C_FLAGS="-march=x86-64-v2" \
+              CMAKE_CXX_FLAGS="-march=x86-64-v2" \
+              onnxruntime_BUILD_SHARED_LIB=OFF
+          mkdir -p ../ort-dist/lib ../ort-dist/include
+          find build -name 'libonnxruntime.a' -exec cp {} ../ort-dist/lib/ \;
+          cp -r include/* ../ort-dist/include/
+          ls -la ../ort-dist/lib/
+
+      - name: 验证 baseline 库（不能含 AVX2 专属指令）
+        run: |
+          set -eux
+          LIB=ort-dist/lib/libonnxruntime.a
+          test -f "$LIB"
+          # AVX2 专属助记符：vpbroadcast* / vpermd / vpgatherd* / vpsllvd / vfmadd*（FMA 与 AVX2 同代）
+          N=$(objdump -d "$LIB" | grep -cE 'vpbroadcast|vpermd|vpgatherdd|vpgatherdq|vpsllvd|vpsravd|vfmadd|vfmsub|vfnmadd' || true)
+          echo "AVX2/FMA 专属指令行数: $N"
+          if [ "$N" -gt 0 ]; then
+            echo "::error::baseline ORT 里仍有 AVX2/FMA 指令，老 CPU 会 SIGILL"
+            objdump -d "$LIB" | grep -E 'vpbroadcast|vpermd|vpgatherdd|vpsllvd|vfmadd' | head -5
+            exit 1
+          fi
+          echo "✓ baseline ORT 干净"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ort-baseline
+          path: ort-dist/**
+
   linux:
+    needs: ort-baseline
     # ONNX Runtime 的静态库需要较新的 glibc（__isoc23_* 符号），22.04 链不上。
     runs-on: ubuntu-24.04
     steps:
@@ -29,13 +115,34 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: 构建
+      - uses: actions/download-artifact@v4
+        with:
+          name: ort-baseline
+          path: ort-dist
+
+      - name: 构建（用自编的 baseline ORT，不下载官方 AVX2 版本）
         # 锁住指令集：CI 的 runner 是新 CPU（有 AVX-512），默认编出来的二进制
         # 在老机器（如 Ivy Bridge）上会直接 SIGILL。x86-64-v2 = SSE4.2 一代，
         # 2009 年后的 CPU 都支持，且不含 AVX2。
         env:
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
+          # 让 ort-sys 用我们自己的库，别再下官方的 AVX2 预编译包。
+          ORT_LIB_LOCATION: ${{ github.workspace }}/ort-dist
+          ORT_SKIP_DOWNLOAD: "1"
         run: cargo build --release
+
+      - name: 检查二进制里残留的 AVX2/AVX512 指令
+        run: |
+          set -eux
+          BIN=target/release/upmix-gui
+          N=$(objdump -d "$BIN" | grep -cE 'vpbroadcast|vpermd|vpgatherdd|vpsllvd|vfmadd|vfmsub|vfnmadd' || true)
+          echo "AVX2/FMA 专属指令行数: $N"
+          echo "含 zmm（AVX-512）的行数: $(objdump -d "$BIN" | grep -cE '%zmm' || true)"
+          if [ "$N" -gt 0 ]; then
+            echo "::error::二进制里仍有 AVX2/FMA 指令，老 CPU 会 SIGILL"
+            exit 1
+          fi
+          echo "✓ 产物干净，可以在 Ivy Bridge 上跑"
 
       - name: 取静态 ffmpeg（随包分发，用户不用自己装）
         run: |
