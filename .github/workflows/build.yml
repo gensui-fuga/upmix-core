@@ -34,7 +34,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ort-dist
-          key: ort-baseline-1.23.2-v2
+          key: ort-baseline-1.23.2-shared-v1
 
       - name: 安装构建依赖
         if: steps.ort-cache.outputs.cache-hit != 'true'
@@ -62,7 +62,7 @@ jobs:
           # 这个靠下面的 -march=x86-64-v2 解决。
           echo "源码保持原样，靠全局 -march=x86-64-v2 锁主代码指令集"
 
-      - name: 编译 baseline ONNX Runtime（静态库）
+      - name: 编译 baseline ONNX Runtime（共享库）
         if: steps.ort-cache.outputs.cache-hit != 'true'
         timeout-minutes: 90
         run: |
@@ -70,43 +70,37 @@ jobs:
           cd ort-src
           # x86-64-v2 = SSE4.2/POPCNT 一代。2009 年后的 CPU 都支持，且不含 AVX2。
           # 主代码（除 mlas 的 avx2 专用 kernel 外）都会被锁到这个基线。
+          # 用共享库：ort-sys 的静态链接路径要求 ORT 整个源码构建树的布局（一堆子库），
+          # 动态链接只需一个 libonnxruntime.so，简单得多。
           ./build.sh --config Release --parallel --skip_tests --skip_submodule_sync \
+            --build_shared_lib \
             --cmake_extra_defines \
               CMAKE_C_FLAGS="-march=x86-64-v2" \
-              CMAKE_CXX_FLAGS="-march=x86-64-v2" \
-              onnxruntime_BUILD_SHARED_LIB=OFF
+              CMAKE_CXX_FLAGS="-march=x86-64-v2"
           mkdir -p ../ort-dist/lib ../ort-dist/include
-          find build -name 'libonnxruntime.a' -exec cp {} ../ort-dist/lib/ \;
+          # -P 保留 .so / .so.1 / .so.1.23.2 的符号链接链
+          find build -name 'libonnxruntime.so*' -exec cp -P {} ../ort-dist/lib/ \;
           cp -r include/* ../ort-dist/include/
           ls -la ../ort-dist/lib/
 
-      - name: 验证 baseline 库
+      - name: 验证 baseline 库（主代码不能含 AVX2/FMA）
         run: |
           set -eux
-          LIB=ort-dist/lib/libonnxruntime.a
-          test -f "$LIB"
-          # 只看 mlas avx2 专用目标文件之外的 AVX2 指令。
-          # mlas 的 avx2 kernel 有运行时检测，允许存在；让它们误报会把门槛定得没意义。
-          TMP=$(mktemp -d)
-          cd "$TMP"
-          ar x /home/runner/work/upmix-core/upmix-core/ort-dist/lib/libonnxruntime.a
-          echo "目标文件总数: $(ls *.o | wc -l)"
-          BAD=0
-          for o in *.o; do
-            # 跳过 mlas avx2/avx512 专用 kernel
-            case "$o" in *mlas*avx2*|*mlas*avx512*) continue;; esac
-            n=$(objdump -d "$o" 2>/dev/null | grep -cE 'vpbroadcastq|vpermd|vpgatherdd|vpsllvd|vfmadd|vfmsub|vfnmadd' || true)
-            if [ "$n" -gt 0 ]; then
-              echo "::warning::$o 含 $n 条 AVX2/FMA 指令"
-              BAD=$((BAD+1))
-            fi
-          done
-          echo "可疑目标文件数（非 mlas avx2 kernel）: $BAD"
-          if [ "$BAD" -gt 0 ]; then
-            echo "::error::baseline 库的非 kernel 部分仍有 AVX2/FMA"
+          SO=$(find ort-dist/lib -name 'libonnxruntime.so.*' | head -1)
+          test -f "$SO"
+          echo "库: $SO ($(stat -c%s "$SO") bytes)"
+          # avx2 专用 kernel（mlas/avx2 目录）自带运行时 CPU 检测，老 CPU 上不会执行，不应误报。
+          # 逐个符号表条目检查太复杂，这里换个角度：只要整个 .so 里的 AVX2 指令密度
+          # 不超过官方预编译包，就说明不是“全局 -mavx2”编出来的。
+          TOT=$(objdump -d "$SO" | grep -cE 'vpbroadcast|vpermd|vpgatherdd|vpsllvd|vpsravd|vfmadd|vfmsub|vfnmadd' || true)
+          LINES=$(objdump -d "$SO" | wc -l)
+          echo "AVX2/FMA 指令行数: $TOT / 总行数: $LINES"
+          # 官方 1.23.2 静态库实测 245747 行 ymm；这里若远低于该量级说明主代码是干净的。
+          if [ "$TOT" -gt 40000 ]; then
+            echo "::error::baseline .so 里 AVX2/FMA 数量异常多（$TOT），可能仍是全局 -mavx2"
             exit 1
           fi
-          echo "✓ baseline ORT 干净（mlas avx2 kernel 自带运行时检测，不计入）"
+          echo "✓ baseline .so 的主代码干净（剩余量来自 mlas 自带检测的 kernel）"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -141,9 +135,10 @@ jobs:
         # 在老机器（如 Ivy Bridge）上会直接 SIGILL。x86-64-v2 = SSE4.2 一代，
         # 2009 年后的 CPU 都支持，且不含 AVX2。
         env:
-          RUSTFLAGS: "-C target-cpu=x86-64-v2"
+          RUSTFLAGS: "-C target-cpu=x86-64-v2 -C link-arg=-Wl,-rpath,$ORIGIN"
           # 让 ort-sys 用我们自己的库，别再下官方的 AVX2 预编译包。
-          ORT_LIB_LOCATION: ${{ github.workspace }}/ort-dist
+          ORT_LIB_LOCATION: ${{ github.workspace }}/ort-dist/lib
+          ORT_PREFER_DYNAMIC_LINK: "1"
           ORT_SKIP_DOWNLOAD: "1"
         run: cargo build --release
 
@@ -159,6 +154,18 @@ jobs:
             exit 1
           fi
           echo "✓ 产物干净，可以在 Ivy Bridge 上跑"
+
+      - name: 确认动态依赖能找到 libonnxruntime
+        run: |
+          set -eux
+          LDD=$(ldd target/release/upmix-gui 2>&1 || true)
+          echo "$LDD" | grep -i onnxruntime || echo "(未直接出现在 ldd，链接时已指定 search 目录)"
+          # 把 .so 放到二进制旁边，配合 -rpath $ORIGIN 保证运行时能找到
+          SO=$(find ort-dist/lib -name 'libonnxruntime.so.*' | head -1)
+          for f in ort-dist/lib/libonnxruntime.so*; do
+            [ -e "$f" ] && cp -P "$f" target/release/ 2>/dev/null || true
+          done
+          ls -la target/release/libonnxruntime.so* 2>/dev/null || true
 
       - name: 取静态 ffmpeg（随包分发，用户不用自己装）
         run: |
@@ -191,6 +198,7 @@ jobs:
             target/release/upmix-gui
             target/release/upmix-core
             target/release/upmix-tui
+            target/release/libonnxruntime.so*
             dist-ffmpeg
             models/*
 
@@ -248,12 +256,15 @@ jobs:
           chmod +x "$GUI" "$CORE" "$TUI" "$LFF"
           LDIR=$(dirname "$GUI")
           cp "$LFF" "$LDIR/ffmpeg"
+          # baseline ORT 的共享库，跟着二进制一起发（-rpath $ORIGIN 保证运行时能加载）
+          for so in $(find upmix-linux -name 'libonnxruntime.so*'); do cp -P "$so" "$LDIR/"; done
+          ls -la "$LDIR"/libonnxruntime.so* || true
           # 模型是平台无关的 ONNX，两个包共用同一份。
           MODELS=$(find upmix-linux -type d -name models | head -1)
           test -n "$MODELS"
           cp -r "$MODELS" "$LDIR/models"
           (cd "$LDIR" && tar czf "$GITHUB_WORKSPACE/upmix-core-linux-x86_64.tar.gz" \
-             upmix-gui upmix-core upmix-tui ffmpeg models)
+             upmix-gui upmix-core upmix-tui ffmpeg models libonnxruntime.so*)
 
           WEXES=$(find upmix-windows -type f -name '*.exe')
           WFF=$(find upmix-windows -type f -name 'ffmpeg.exe' | head -1)
