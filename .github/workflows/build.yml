@@ -240,47 +240,52 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
+    # legacy-cpu 分支只发 Linux 包：Windows 的 baseline ORT 还没做，
+    # 官方 Windows ORT 同样要 AVX2，发给老机器用户会直接 SIGILL，不发反而更干净。
+    needs: [linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
+        with:
+          name: upmix-linux
 
-      - name: 打包（二进制 + 自带 ffmpeg）
+      - name: 打包（二进制 + 自带 ffmpeg + baseline ORT）
         run: |
           set -eux
-          # download-artifact 会保留上传时的目录结构，用 find 定位，不猜路径。
-          GUI=$(find upmix-linux -type f -name upmix-gui | head -1)
-          CORE=$(find upmix-linux -type f -name upmix-core | head -1)
-          TUI=$(find upmix-linux -type f -name upmix-tui | head -1)
-          LFF=$(find upmix-linux -type f -name 'ffmpeg' -o -type f -name 'dist-ffmpeg' -o -type f -name 'ffmpeg-*' | head -1)
+          GUI=$(find . -type f -name upmix-gui | head -1)
+          CORE=$(find . -type f -name upmix-core | head -1)
+          TUI=$(find . -type f -name upmix-tui | head -1)
+          LFF=$(find . -type f -name 'ffmpeg' -o -type f -name 'dist-ffmpeg' -o -type f -name 'ffmpeg-*' | head -1)
           test -n "$GUI" && test -n "$LFF"
           chmod +x "$GUI" "$CORE" "$TUI" "$LFF"
           LDIR=$(dirname "$GUI")
           cp "$LFF" "$LDIR/ffmpeg"
-          # baseline ORT 的共享库，跟着二进制一起发（-rpath $ORIGIN 保证运行时能加载）
-          for so in $(find upmix-linux -name 'libonnxruntime.so*'); do cp -P "$so" "$LDIR/"; done
+          for so in $(find . -name 'libonnxruntime.so*'); do cp -P "$so" "$LDIR/"; done
           ls -la "$LDIR"/libonnxruntime.so* || true
-          # 模型是平台无关的 ONNX，两个包共用同一份。
-          MODELS=$(find upmix-linux -type d -name models | head -1)
+          MODELS=$(find . -type d -name models | head -1)
           test -n "$MODELS"
           cp -r "$MODELS" "$LDIR/models"
-          (cd "$LDIR" && tar czf "$GITHUB_WORKSPACE/upmix-core-linux-x86_64.tar.gz" \
+          (cd "$LDIR" && tar czf "$GITHUB_WORKSPACE/upmix-core-linux-x86_64-legacy.tar.gz" \
              upmix-gui upmix-core upmix-tui ffmpeg models libonnxruntime.so*)
-
-          WEXES=$(find upmix-windows -type f -name '*.exe')
-          WFF=$(find upmix-windows -type f -name 'ffmpeg.exe' | head -1)
-          WDIR=$(dirname "$(find upmix-windows -type f -name upmix-gui.exe | head -1)")
-          test -n "$WDIR" && test -n "$WFF"
-          # ffmpeg.exe 在 artifact 根目录，不在 target/release 里，得手动放过去。
-          cp "$WFF" "$WDIR/ffmpeg.exe"
-          cp -r "$MODELS" "$WDIR/models"
-          (cd "$WDIR" && zip -r -q "$GITHUB_WORKSPACE/upmix-core-windows-x86_64.zip" . -i '*.exe' -i 'models/*')
-          ls -la "$GITHUB_WORKSPACE"/*.tar.gz "$GITHUB_WORKSPACE"/*.zip
+          ls -la "$GITHUB_WORKSPACE"/*.tar.gz
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            upmix-core-linux-x86_64.tar.gz
-            upmix-core-windows-x86_64.zip
+            upmix-core-linux-x86_64-legacy.tar.gz
+          body: |
+            ## 老 CPU 专用版（无 AVX2）
+
+            适用于 2012 年前后的 CPU（Ivy Bridge / Sandy Bridge，如 i5-3320M、Celeron J1900）。
+
+            **和主线版的区别**：ONNX Runtime 是在 CI 里用 `-march=x86-64-v2` 重新编译的，
+            不含官方预编译包里的 AVX2/AVX-512 指令，所以在老 CPU 上不会 SIGILL。
+
+            **代价**：自动（分离）模式会明显变慢（双核 + 无 FMA 的硬伤）。
+            快速模式不受影响。
+
+            **包含**：upmix-gui / upmix-core / upmix-tui + 静态 ffmpeg + htdemucs 模型 + baseline libonnxruntime.so
+
+            解压后直接跑：`./upmix-gui`（libonnxruntime.so 就在旁边，rpath 已指向 $ORIGIN）
