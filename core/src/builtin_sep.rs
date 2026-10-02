@@ -124,7 +124,11 @@ pub fn separate(buf: &AudioBuffer) -> Result<StemAudio> {
     let (src_l, src_r) = to_stereo_f32(buf);
     let n = src_l.len();
 
-    let mut out: [Vec<f32>; 4] = [
+    let mut out: [Vec<f32>; 8] = [
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
         Vec::with_capacity(n),
         Vec::with_capacity(n),
         Vec::with_capacity(n),
@@ -150,25 +154,32 @@ pub fn separate(buf: &AudioBuffer) -> Result<StemAudio> {
             .map_err(|e| anyhow::anyhow!("推理失败: {e}"))?;
         let t_out = window.shape()[2];
         let copy = hop.min(t_out).min(n - pos);
+        // window 的 shape 是 [stem, 声道, 时间]：声道 0 是 L、1 是 R。
+        // 两个声道都要取，不然下游会报 "stem 'xxx' must be stereo"。
         for (k, src_idx) in [vi, di, bi, oi].iter().enumerate() {
             for i in 0..copy {
-                out[k].push(window[(*src_idx, 0, i)]);
+                out[k * 2].push(window[(*src_idx, 0, i)]);
+                out[k * 2 + 1].push(window[(*src_idx, 1, i)]);
             }
         }
         pos += hop;
     }
 
-    let mk = |s: Vec<f32>| AudioBuffer {
+    // 每个 stem 拼成双声道缓冲：data[0] = L，data[1] = R。
+    let mk = |l: Vec<f32>, r: Vec<f32>| AudioBuffer {
         sample_rate: 44100,
         bits_per_sample: 32,
-        data: vec![s.iter().map(|&x| x as f64).collect()],
+        data: vec![
+            l.iter().map(|&x| x as f64).collect(),
+            r.iter().map(|&x| x as f64).collect(),
+        ],
     };
 
     let mut it = out.into_iter();
     Ok(StemAudio {
-        vocals: mk(it.next().unwrap()),
-        drums: mk(it.next().unwrap()),
-        bass: mk(it.next().unwrap()),
-        other: mk(it.next().unwrap()),
+        vocals: mk(it.next().unwrap(), it.next().unwrap()),
+        drums: mk(it.next().unwrap(), it.next().unwrap()),
+        bass: mk(it.next().unwrap(), it.next().unwrap()),
+        other: mk(it.next().unwrap(), it.next().unwrap()),
     })
 }
