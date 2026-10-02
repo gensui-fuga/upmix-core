@@ -35,6 +35,10 @@ jobs:
         with:
           path: ort-dist
           key: ort-baseline-1.23.2-shared-v1
+          # tag 的 run 看不到分支的缓存（GitHub 缓存按分支隔离），
+          # restore-keys 让它退而求其次复用同前缀的缓存，避免发版时重编 ORT。
+          restore-keys: |
+            ort-baseline-1.23.2-shared-
 
       - name: 安装构建依赖
         if: steps.ort-cache.outputs.cache-hit != 'true'
