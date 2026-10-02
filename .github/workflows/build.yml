@@ -266,7 +266,7 @@ jobs:
           chmod +x "$GUI" "$CORE" "$TUI" "$LFF"
           LDIR=$(dirname "$GUI")
           cp "$LFF" "$LDIR/ffmpeg"
-          for so in $(find . -name 'libonnxruntime.so*'); do cp -P "$so" "$LDIR/"; done
+          for so in $(find . -name 'libonnxruntime.so*' -not -path "$LDIR/*"); do cp -P "$so" "$LDIR/"; done
           ls -la "$LDIR"/libonnxruntime.so* || true
           MODELS=$(find . -type d -name models | head -1)
           test -n "$MODELS"
