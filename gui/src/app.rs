@@ -721,9 +721,16 @@ fn zenity_dialog(dir: bool) -> Vec<PathBuf> {
     if dir {
         c.arg("--directory").arg("--title=选择音乐文件夹");
     } else {
+        // 过滤器跟着 core 的统一列表走，别再手写一份只认 flac/wav 的。
+        let pats: Vec<String> = upmix_core::fileio::INPUT_EXTS
+            .iter()
+            .map(|e| format!("*.{e}"))
+            .collect();
+        let joined = pats.join(" ");
         c.arg("--multiple")
             .arg("--separator=\n")
-            .arg("--file-filter=音频 | *.flac *.wav")
+            .arg(format!("--file-filter=音频 | {joined}"))
+            .arg("--file-filter=所有文件 | *")
             .arg("--title=选择音乐文件（可多选）");
     }
     let Ok(out) = c.output() else { return Vec::new() };
@@ -743,12 +750,20 @@ fn zenity_dialog(dir: bool) -> Vec<PathBuf> {
 #[cfg(target_os = "windows")]
 fn powershell_dialog(dir: bool) -> Vec<PathBuf> {
     let script = if dir {
-        r#"Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = '选择音乐文件夹'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }"#
+        r#"Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = '选择音乐文件夹'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }"#.to_string()
     } else {
-        r#"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Multiselect = $true; $f.Title = '选择音乐文件（可多选）'; $f.Filter = '音频 (*.flac;*.wav)|*.flac;*.wav|所有文件 (*.*)|*.*'; if ($f.ShowDialog() -eq 'OK') { [Console]::Out.Write(($f.FileNames -join [Environment]::NewLine)) }"#
+        // 过滤器从 core 的 INPUT_EXTS 生成，避免和 core 支持的格式脱节。
+        let exts: Vec<String> = upmix_core::fileio::INPUT_EXTS
+            .iter()
+            .map(|e| format!("*.{e}"))
+            .collect();
+        let semi = exts.join(";");
+        format!(
+            r#"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Multiselect = $true; $f.Title = '选择音乐文件（可多选）'; $f.Filter = '音频 ({semi})|{semi}|所有文件 (*.*)|*.*'; if ($f.ShowDialog() -eq 'OK') {{ [Console]::Out.Write(($f.FileNames -join [Environment]::NewLine)) }}"#
+        )
     };
     let Ok(out) = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-STA", "-Command", script])
+        .args(["-NoProfile", "-STA", "-Command", &script])
         .output()
     else {
         return Vec::new();
@@ -1012,7 +1027,7 @@ fn collect(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
                 collect(&p, depth - 1, out);
             }
         } else if let Some(ext) = p.extension().and_then(|x| x.to_str()) {
-            if matches!(ext.to_ascii_lowercase().as_str(), "flac" | "wav") {
+            if upmix_core::fileio::is_input_ext(ext) {
                 out.push(p);
             }
         }
