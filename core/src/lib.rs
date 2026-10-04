@@ -6,16 +6,16 @@ pub mod dsp {
     pub mod stft;
 }
 pub mod io {
+    pub mod flac;
     pub mod pcm;
     pub mod wav;
-    pub mod flac;
 }
-pub mod upmix;
 pub mod auto;
-pub mod builtin_sep;
-pub mod metadata;
 pub mod backend;
+pub mod builtin_sep;
 pub mod cli;
+pub mod metadata;
+pub mod upmix;
 
 /// Format-agnostic file IO helpers shared by the CLI, TUI and Android builds.
 pub mod fileio {
@@ -33,7 +33,11 @@ pub mod fileio {
 
     /// 找一个 ffmpeg：优先程序自己旁边的（发行包随机附带），再 PATH。
     pub fn ffmpeg_path() -> std::path::PathBuf {
-        let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+        let name = if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        };
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 let p = dir.join(name);
@@ -54,8 +58,8 @@ pub mod fileio {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let tmp = std::env::temp_dir()
-            .join(format!("upmix-dec-{}-{nanos}.wav", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("upmix-dec-{}-{nanos}.wav", std::process::id()));
         let out = std::process::Command::new(&ff)
             .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
             .arg(path)
