@@ -663,6 +663,77 @@ mod tests {
         assert_eq!(u32::from_le_bytes([c[4], c[5], c[6], c[7]]), 3);
     }
 
+    /// 回归测试：这条正是原始 bug 的现场。
+    ///
+    /// 以前 `inject_into_flac` 只认 FLAC 源，非 FLAC 直接退化成空元数据，
+    /// 而且调用处 `.ok()` 把错误吞了。下面这堆测试全都只喂手工构造的 FLAC 块，
+    /// **没有一个**能发现那个问题——所以单独补一个走 donor 的。
+    ///
+    /// 需要 ffmpeg（donor 靠它）。没有就跳过，不误报失败。
+    #[test]
+    fn non_flac_source_yields_tags() {
+        use std::process::Stdio;
+        let probe = std::process::Command::new(ffmpeg_bin())
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // 只有"根本没这个程序"才跳过；ffmpeg 在但跑挂了属于真问题，要让它红。
+        match probe {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skip non_flac_source_yields_tags: 本机没有 ffmpeg");
+                return;
+            }
+            Err(e) => panic!("ffmpeg 起不来：{e}"),
+            Ok(_) => {}
+        }
+
+        // 手写一个带 LIST/INFO 的最小 WAV（0.1 秒静音立体声）。
+        // 不用 ffmpeg 生成源，是为了确保"源不是 FLAC"这一点由测试自己控制。
+        let frames = 4410usize;
+        let data_len = (frames * 2 * 2) as u32;
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        body.extend_from_slice(&2u16.to_le_bytes()); // 立体声
+        body.extend_from_slice(&44100u32.to_le_bytes());
+        body.extend_from_slice(&(44100u32 * 4).to_le_bytes()); // byte rate
+        body.extend_from_slice(&4u16.to_le_bytes()); // block align
+        body.extend_from_slice(&16u16.to_le_bytes()); // 位深
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&data_len.to_le_bytes());
+        body.extend_from_slice(&vec![0u8; data_len as usize]);
+        let mut info: Vec<u8> = Vec::new();
+        info.extend_from_slice(b"INFO");
+        info.extend_from_slice(&riff_chunk(b"INAM", b"DonorTitle"));
+        info.extend_from_slice(&riff_chunk(b"IART", b"DonorArtist"));
+        body.extend_from_slice(b"LIST");
+        body.extend_from_slice(&(info.len() as u32).to_le_bytes());
+        body.extend_from_slice(&info);
+        let mut wav: Vec<u8> = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&body);
+
+        let src = std::env::temp_dir().join(format!("upmix-donor-test-{}.wav", std::process::id()));
+        std::fs::write(&src, &wav).unwrap();
+
+        let blocks = load_source_blocks(&src).expect("非 FLAC 源要能通过 donor 拿到元数据");
+        let joined = tags_from_blocks(&blocks).join("\n").to_lowercase();
+        assert!(
+            joined.contains("donortitle"),
+            "donor 没把标题抽出来，拿到的标签是：{joined}"
+        );
+        assert!(
+            joined.contains("donorartist"),
+            "donor 没把歌手抽出来，拿到的标签是：{joined}"
+        );
+
+        let _ = std::fs::remove_file(&src);
+    }
+
     #[test]
     fn container_noise_is_filtered() {
         assert!(is_container_noise("handler_name=SoundHandler"));
