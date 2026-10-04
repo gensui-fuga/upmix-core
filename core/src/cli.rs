@@ -181,7 +181,10 @@ pub fn run() -> Result<()> {
 }
 
 fn default_output(input: &Path, outdir: Option<&Path>, format: &str) -> PathBuf {
-    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
     let name = format!("{stem}_5.1.{format}");
     match outdir {
         Some(d) => d.join(name),
@@ -191,7 +194,10 @@ fn default_output(input: &Path, outdir: Option<&Path>, format: &str) -> PathBuf 
 
 fn run_batch(cli: &Cli, normalize: NormalizeMode, dir: &Path, t0: Instant) -> Result<()> {
     let mut files: Vec<PathBuf> = Vec::new();
-    for e in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?.flatten() {
+    for e in std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .flatten()
+    {
         let p = e.path();
         if !p.is_file() {
             continue;
@@ -211,7 +217,10 @@ fn run_batch(cli: &Cli, normalize: NormalizeMode, dir: &Path, t0: Instant) -> Re
     }
     files.sort();
     if files.is_empty() {
-        eprintln!("{dir} 里没有找到音频文件（支持 flac/wav/mp3/m4a/ogg/opus 等）", dir = dir.display());
+        eprintln!(
+            "{dir} 里没有找到音频文件（支持 flac/wav/mp3/m4a/ogg/opus 等）",
+            dir = dir.display()
+        );
         return Ok(());
     }
     eprintln!("batch: {} file(s) in {}", files.len(), dir.display());
@@ -221,7 +230,12 @@ fn run_batch(cli: &Cli, normalize: NormalizeMode, dir: &Path, t0: Instant) -> Re
     for (i, input) in files.iter().enumerate() {
         let out = default_output(input, cli.outdir.as_deref(), &cli.format);
         if cli.skip_existing && out.exists() {
-            eprintln!("[{}/{}] skip (exists): {}", i + 1, files.len(), out.display());
+            eprintln!(
+                "[{}/{}] skip (exists): {}",
+                i + 1,
+                files.len(),
+                out.display()
+            );
             continue;
         }
         eprintln!("[{}/{}] {}", i + 1, files.len(), input.display());
@@ -233,7 +247,10 @@ fn run_batch(cli: &Cli, normalize: NormalizeMode, dir: &Path, t0: Instant) -> Re
             }
         }
     }
-    eprintln!("batch done: {ok} ok, {failed} failed, {:.1} s total", t0.elapsed().as_secs_f64());
+    eprintln!(
+        "batch done: {ok} ok, {failed} failed, {:.1} s total",
+        t0.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -281,7 +298,10 @@ fn run_fast(
     let buf = crate::fileio::read_any(input)?;
     buf.validate()?;
     if buf.num_channels() != 2 {
-        bail!("input must be stereo, found {} channels", buf.num_channels());
+        bail!(
+            "input must be stereo, found {} channels",
+            buf.num_channels()
+        );
     }
     let output = Upmixer::new(cfg).process(&buf)?;
     write_any(out_path, &output, Some(input))?;
@@ -294,17 +314,19 @@ fn run_fast(
 // ---------------------------------------------------------------- auto mode
 
 fn run_auto(cli: &Cli, input: &Path, out_path: &Path, verbose: bool, t0: Instant) -> Result<()> {
-    let tmp = cli
-        .stem_cache
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("upmix-stems-{}", std::process::id())));
+    let tmp = cli.stem_cache.clone().unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("upmix-stems-{}", std::process::id()))
+    });
     std::fs::create_dir_all(&tmp).ok();
 
     // 默认走内置引擎（纯 Rust + ONNX Runtime），不依赖 Python / pip。
     // 想用外挂的 demucs 就加 --external-demucs。
     let wanted = if cli.external_demucs {
         if !cli.quiet {
-            eprintln!("[auto] separating stems with external demucs '{}' …", cli.model);
+            eprintln!(
+                "[auto] separating stems with external demucs '{}' …",
+                cli.model
+            );
         }
         Some(demucs_separate_dir(cli, input, &tmp)?)
     } else {
@@ -329,7 +351,10 @@ fn run_auto(cli: &Cli, input: &Path, out_path: &Path, verbose: bool, t0: Instant
                 src
             } else {
                 if !cli.quiet {
-                    eprintln!("[auto] resampling {} Hz -> 44100 Hz for the model", src.sample_rate);
+                    eprintln!(
+                        "[auto] resampling {} Hz -> 44100 Hz for the model",
+                        src.sample_rate
+                    );
                 }
                 resample(&src, 44100)
             };
@@ -383,7 +408,10 @@ fn run_auto(cli: &Cli, input: &Path, out_path: &Path, verbose: bool, t0: Instant
 }
 
 fn find_stems_dir(root: &Path, input: &Path) -> Result<PathBuf> {
-    let track = input.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+    let track = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("track");
     fn walk(dir: &Path, track: &str) -> Option<PathBuf> {
         for e in std::fs::read_dir(dir).ok()?.flatten() {
             let p = e.path();
@@ -439,7 +467,9 @@ fn demucs_separate_dir(cli: &Cli, input: &Path, tmp: &Path) -> Result<PathBuf> {
 /// 读文件的采样率，纯 Rust（FLAC 用 claxon、WAV 用 hound），不依赖 ffprobe。
 fn probe_sample_rate(path: &Path) -> Option<u32> {
     match ext_of(path).as_str() {
-        "wav" | "wave" => hound::WavReader::open(path).ok().map(|r| r.spec().sample_rate),
+        "wav" | "wave" => hound::WavReader::open(path)
+            .ok()
+            .map(|r| r.spec().sample_rate),
         "flac" => claxon::FlacReader::open(path)
             .ok()
             .map(|r| r.streaminfo().sample_rate),

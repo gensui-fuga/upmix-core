@@ -118,7 +118,12 @@ pub fn separate(buf: &AudioBuffer) -> Result<StemAudio> {
         anyhow::bail!("manifest 里的 window/hop 不合法: {win}/{hop}");
     }
     let names: Vec<String> = if mf.stems.is_empty() {
-        vec!["vocals".into(), "drums".into(), "bass".into(), "other".into()]
+        vec![
+            "vocals".into(),
+            "drums".into(),
+            "bass".into(),
+            "other".into(),
+        ]
     } else {
         mf.stems.clone()
     };

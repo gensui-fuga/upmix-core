@@ -67,14 +67,23 @@ pub fn parse_vorbis(payload: &[u8]) -> Vec<String> {
         if *p + 4 > payload.len() {
             return None;
         }
-        let v = u32::from_le_bytes([payload[*p], payload[*p + 1], payload[*p + 2], payload[*p + 3]]);
+        let v = u32::from_le_bytes([
+            payload[*p],
+            payload[*p + 1],
+            payload[*p + 2],
+            payload[*p + 3],
+        ]);
         *p += 4;
         Some(v)
     };
     // vendor
-    let Some(vlen) = rd_u32(&mut p) else { return out };
+    let Some(vlen) = rd_u32(&mut p) else {
+        return out;
+    };
     p = (p + vlen as usize).min(payload.len());
-    let Some(count) = rd_u32(&mut p) else { return out };
+    let Some(count) = rd_u32(&mut p) else {
+        return out;
+    };
     for _ in 0..count {
         let Some(clen) = rd_u32(&mut p) else { break };
         let end = (p + clen as usize).min(payload.len());
@@ -220,13 +229,21 @@ pub fn inject_into_flac(path: &Path, source: Option<&Path>, extra_tags: &[String
     // STREAMINFO
     let si_last = blocks.is_empty();
     out.push(if si_last { 0x80 } else { 0x00 });
-    out.extend_from_slice(&[(si.len() >> 16) as u8, (si.len() >> 8) as u8, si.len() as u8]);
+    out.extend_from_slice(&[
+        (si.len() >> 16) as u8,
+        (si.len() >> 8) as u8,
+        si.len() as u8,
+    ]);
     out.extend_from_slice(&si);
     // our blocks
     for (i, (typ, payload)) in blocks.iter().enumerate() {
         let last = i == blocks.len() - 1;
         out.push(if last { 0x80 } else { 0x00 } | (typ & 0x7F));
-        out.extend_from_slice(&[(payload.len() >> 16) as u8, (payload.len() >> 8) as u8, payload.len() as u8]);
+        out.extend_from_slice(&[
+            (payload.len() >> 16) as u8,
+            (payload.len() >> 8) as u8,
+            payload.len() as u8,
+        ]);
         out.extend_from_slice(payload);
     }
     out.extend_from_slice(audio);
@@ -268,14 +285,22 @@ pub fn make_metadata_donor(src: &Path) -> Result<PathBuf> {
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(src)
         .args([
-            "-map", "0:a",
-            "-map_metadata", "0",
-            "-map_metadata:g", "0:s:a:0",
-            "-map", "0:v:0?",
-            "-c:a", "flac",
-            "-c:v", "copy",
-            "-disposition:v", "attached_pic",
-            "-t", "0.1",
+            "-map",
+            "0:a",
+            "-map_metadata",
+            "0",
+            "-map_metadata:g",
+            "0:s:a:0",
+            "-map",
+            "0:v:0?",
+            "-c:a",
+            "flac",
+            "-c:v",
+            "copy",
+            "-disposition:v",
+            "attached_pic",
+            "-t",
+            "0.1",
         ])
         .arg(&out)
         .output();
@@ -340,12 +365,19 @@ fn riff_info_key(tag: &str) -> Option<[u8; 4]> {
 fn id3_only_tags(comments: &[String]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for c in comments {
-        let Some((k, v)) = c.split_once('=') else { continue };
+        let Some((k, v)) = c.split_once('=') else {
+            continue;
+        };
         let ku = k.trim().to_ascii_uppercase();
         // 歌词/作词作曲这类 RIFF INFO 没有对应键的，全过继给 ID3。
         let keep = matches!(
             ku.as_str(),
-            "LYRICS" | "UNSYNCEDLYRICS" | "UNSYNCED_LYRICS" | "SYNCEDLYRICS" | "COMPOSER" | "LYRICIST"
+            "LYRICS"
+                | "UNSYNCEDLYRICS"
+                | "UNSYNCED_LYRICS"
+                | "SYNCEDLYRICS"
+                | "COMPOSER"
+                | "LYRICIST"
         );
         if keep {
             out.push((ku, v.to_string()));
@@ -450,7 +482,9 @@ pub fn inject_into_wav(path: &Path, source: Option<&Path>) -> Result<()> {
     let mut info = Vec::new();
     info.extend_from_slice(b"INFO");
     for c in &comments {
-        let Some((k, v)) = c.split_once('=') else { continue };
+        let Some((k, v)) = c.split_once('=') else {
+            continue;
+        };
         if let Some(key) = riff_info_key(k) {
             if v.is_empty() {
                 continue;
@@ -520,7 +554,9 @@ pub fn inject_into_wav(path: &Path, source: Option<&Path>) -> Result<()> {
 /// 播放器是按“音频文件名”去找歌词的：`song_5.1.flac` 要配 `song_5.1.lrc`。
 /// 不做这一步，用户放在旁边的歌词就成了孤儿。
 pub fn copy_sidecar_lyrics(output: &Path, source: &Path) {
-    let Some(src_dir) = source.parent() else { return };
+    let Some(src_dir) = source.parent() else {
+        return;
+    };
     let Some(src_stem) = source.file_stem().and_then(|s| s.to_str()) else {
         return;
     };
@@ -579,9 +615,15 @@ mod tests {
 
     #[test]
     fn merge_keeps_source_tags_and_adds_mask() {
-        let src_vc = build_vorbis("ref", &["TITLE=Song".to_string(), "LYRICS=la la".to_string()]);
+        let src_vc = build_vorbis(
+            "ref",
+            &["TITLE=Song".to_string(), "LYRICS=la la".to_string()],
+        );
         let source: Vec<Block> = vec![(T_VORBIS_COMMENT, src_vc), (T_PICTURE, vec![1, 2, 3])];
-        let out = build_output_blocks(&source, &["WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x003F".to_string()]);
+        let out = build_output_blocks(
+            &source,
+            &["WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x003F".to_string()],
+        );
         // picture preserved
         assert!(out.iter().any(|(t, _)| *t == T_PICTURE));
         // vorbis merged
@@ -631,7 +673,11 @@ mod tests {
         // 过滤后 m4a 的垃圾不会进输出
         let vc = build_vorbis(
             "t",
-            &["handler_name=S".to_string(), "title=T".to_string(), "language=und".to_string()],
+            &[
+                "handler_name=S".to_string(),
+                "title=T".to_string(),
+                "language=und".to_string(),
+            ],
         );
         let tags = tags_from_blocks(&[(T_VORBIS_COMMENT, vc)]);
         assert_eq!(tags, vec!["title=T".to_string()]);

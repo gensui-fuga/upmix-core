@@ -6,8 +6,8 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 
 pub fn read(path: &Path) -> Result<AudioBuffer> {
-    let mut reader = hound::WavReader::open(path)
-        .with_context(|| format!("opening WAV {}", path.display()))?;
+    let mut reader =
+        hound::WavReader::open(path).with_context(|| format!("opening WAV {}", path.display()))?;
     let spec = reader.spec();
     let channels = spec.channels as usize;
     if channels == 0 {
@@ -100,7 +100,10 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join("upmix_wav_test_16.wav");
         let buf = AudioBuffer::from_i32_planar(
-            vec![vec![0i32, 1000, -1000, 32767], vec![5i32, -5, 20000, -32768]],
+            vec![
+                vec![0i32, 1000, -1000, 32767],
+                vec![5i32, -5, 20000, -32768],
+            ],
             44100,
             16,
         );
