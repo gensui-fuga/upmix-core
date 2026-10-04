@@ -37,6 +37,13 @@ jobs:
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
         run: cargo build --release
 
+      - name: 跑单元测试（元数据搬运/RIFF/ID3 这类纯逻辑，不需要模型）
+        # 以前 CI 只 build 不 test，改坏了没人拦得住。这里补上。
+        # 只测 upmix-core：GUI/TUI 的测试基本是 UI，且会拖长构建。
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v2"
+        run: cargo test --release -p upmix-core
+
       - name: 取静态 ffmpeg（随包分发，用户不用自己装）
         run: |
           set -eux

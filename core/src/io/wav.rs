@@ -65,7 +65,10 @@ pub fn read(path: &Path) -> Result<AudioBuffer> {
     }
 }
 
-pub fn write(path: &Path, buf: &AudioBuffer) -> Result<()> {
+/// 写 WAV。`source` 是输入文件：它的标签会被追加到输出里（RIFF `LIST/INFO`，
+/// 歌词另走 `id3 ` 块）。封面进不了 WAV——wav muxer 不支持视频流，硬塞会让
+/// 文件变成 0 字节，所以这里只搬文本标签。
+pub fn write(path: &Path, buf: &AudioBuffer, source: Option<&Path>) -> Result<()> {
     buf.validate()?;
     let bits = buf.bits_per_sample;
     if !matches!(bits, 16 | 24 | 32) {
@@ -83,6 +86,8 @@ pub fn write(path: &Path, buf: &AudioBuffer) -> Result<()> {
         writer.write_sample(v).context("writing WAV sample")?;
     }
     writer.finalize().context("finalizing WAV")?;
+    // hound 只写 fmt + data，标签得自己补。
+    crate::metadata::inject_into_wav(path, source)?;
     Ok(())
 }
 
@@ -99,7 +104,7 @@ mod tests {
             44100,
             16,
         );
-        write(&path, &buf).unwrap();
+        write(&path, &buf, None).unwrap();
         let back = read(&path).unwrap();
         assert_eq!(back.sample_rate, 44100);
         assert_eq!(back.bits_per_sample, 16);
@@ -116,7 +121,7 @@ mod tests {
             .map(|c| vec![c as i32 * 1000, -c as i32 * 1000, 8388607, -8388608])
             .collect();
         let buf = AudioBuffer::from_i32_planar(data, 96000, 24);
-        write(&path, &buf).unwrap();
+        write(&path, &buf, None).unwrap();
         let back = read(&path).unwrap();
         assert_eq!(back.num_channels(), 6);
         assert_eq!(back.bits_per_sample, 24);

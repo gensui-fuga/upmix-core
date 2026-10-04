@@ -6,7 +6,7 @@
 //! carried into the output.
 
 use crate::io::pcm::AudioBuffer;
-use crate::io::{flac, wav};
+use crate::io::wav;
 use crate::upmix::{NormalizeMode, UpmixConfig, Upmixer};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -21,10 +21,11 @@ use std::time::Instant;
     about = "Stereo -> 5.1 upmixer (fast STFT or auto stem-separation)"
 )]
 pub struct Cli {
-    /// Input file (.flac or .wav), must be stereo. Omit when using --batch.
+    /// 输入文件（flac/wav/mp3/m4a/ogg/opus…，其他格式交给自带 ffmpeg），必须
+    /// 是立体声。用 --batch 时省略此项。
     pub input: Option<PathBuf>,
 
-    /// Process every .flac/.wav in this directory.
+    /// 处理这个目录下的所有音频文件。
     #[arg(long)]
     pub batch: Option<PathBuf>,
 
@@ -109,11 +110,10 @@ fn ext_of(path: &Path) -> String {
 }
 
 fn write_any(path: &Path, buf: &AudioBuffer, source: Option<&Path>) -> Result<()> {
-    match ext_of(path).as_str() {
-        "flac" => flac::write(path, buf, source),
-        "wav" | "wave" => wav::write(path, buf),
-        other => bail!("unsupported output format '.{other}'"),
-    }
+    // 这里曾经有一份和 fileio::write_any 平行的实现，结果两边各自演化：
+    // 这个版本把 WAV 的 source 参数丢了，于是 `--format wav` 出来的文件永远
+    // 没有标签。统一走 fileio，别再分叉。
+    crate::fileio::write_any(path, buf, source)
 }
 
 pub fn run() -> Result<()> {
@@ -176,7 +176,9 @@ fn run_batch(cli: &Cli, normalize: NormalizeMode, dir: &Path, t0: Instant) -> Re
             continue;
         }
         let ext = ext_of(&p);
-        if !matches!(ext.as_str(), "flac" | "wav") {
+        // 以前只放行 flac/wav，把 mp3/m4a/ogg 全挡在批量之外——和“所有格式都要
+        // 有元数据”矛盾。现在用统一列表。
+        if !crate::fileio::is_input_ext(&ext) {
             continue;
         }
         // skip our own outputs
@@ -188,7 +190,7 @@ fn run_batch(cli: &Cli, normalize: NormalizeMode, dir: &Path, t0: Instant) -> Re
     }
     files.sort();
     if files.is_empty() {
-        eprintln!("no .flac/.wav found in {}", dir.display());
+        eprintln!("{dir} 里没有找到音频文件（支持 flac/wav/mp3/m4a/ogg/opus 等）", dir = dir.display());
         return Ok(());
     }
     eprintln!("batch: {} file(s) in {}", files.len(), dir.display());

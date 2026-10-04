@@ -47,7 +47,14 @@ pub mod fileio {
     /// 用自带的 ffmpeg 把 mp3 / m4a / ogg 之类解码成 WAV 再读。
     fn decode_with_ffmpeg(path: &Path) -> Result<AudioBuffer> {
         let ff = ffmpeg_path();
-        let tmp = std::env::temp_dir().join(format!("upmix-dec-{}.wav", std::process::id()));
+        // 临时名必须唯一：以前只带 PID，同一个进程里连着解两个文件（GUI 批量、
+        // CLI 批处理）会互相覆盖，读到的可能是上一个文件的音频。
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = std::env::temp_dir()
+            .join(format!("upmix-dec-{}-{nanos}.wav", std::process::id()));
         let out = std::process::Command::new(&ff)
             .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
             .arg(path)
@@ -69,6 +76,30 @@ pub mod fileio {
         }
     }
 
+    /// 能被处理的输入扩展名。以前这个列表在 CLI/TUI/GUI 里各写一份，结果
+    /// 批量模式只认 flac/wav，mp3/m4a/ogg 连门都进不去。这里留唯一真源。
+    ///
+    /// 注意：任何格式其实都能吃（其余交给自带的 ffmpeg），列出来的只是
+    /// “选文件时该显示什么”。
+    pub const INPUT_EXTS: &[&str] = &[
+        "flac", "wav", "wave", "mp3", "m4a", "mp4", "aac", "ogg", "oga", "opus", "wma", "aiff",
+        "aif", "alac", "ape", "wv", "mpc", "caf", "mka", "w64", "amr", "ac3", "dts", "m4b",
+    ];
+
+    /// 这个扩展名是不是（我们主动推荐选择器显示的）音频输入。
+    pub fn is_input_ext(ext: &str) -> bool {
+        let e = ext.to_ascii_lowercase();
+        INPUT_EXTS.contains(&e.as_str())
+    }
+
+    /// 这个路径是不是能当作输入。
+    pub fn is_input_path(path: &Path) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(is_input_ext)
+            .unwrap_or(false)
+    }
+
     pub fn read_any(path: &Path) -> Result<AudioBuffer> {
         match ext(path).as_str() {
             "flac" => flac::read(path),
@@ -80,10 +111,15 @@ pub mod fileio {
 
     pub fn write_any(path: &Path, buf: &AudioBuffer, source: Option<&Path>) -> Result<()> {
         match ext(path).as_str() {
-            "flac" => flac::write(path, buf, source),
-            "wav" | "wave" => wav::write(path, buf),
+            "flac" => flac::write(path, buf, source)?,
+            "wav" | "wave" => wav::write(path, buf, source)?,
             other => bail!("unsupported output format '.{other}' (use .flac or .wav)"),
         }
+        // 输入旁边的同名 .lrc 跟着输出改名（播放器按音频名找歌词）。
+        if let Some(src) = source {
+            crate::metadata::copy_sidecar_lyrics(path, src);
+        }
+        Ok(())
     }
 }
 
