@@ -239,6 +239,12 @@ impl App {
                     self.status = format!("完成 · {secs:.1}s → {}", p.display());
                     self.status_ok = Some(true);
                 }
+                Err(e) if e.starts_with("完成 ") => {
+                    // 批量里有文件被跳过，但其余成功了——别把整批说成"失败"，
+                    // 也别标成绿色让它看起来一切正常。
+                    self.status = format!("{e} · {secs:.1}s");
+                    self.status_ok = Some(false);
+                }
                 Err(e) => {
                     self.status = format!("失败：{e}");
                     self.status_ok = Some(false);
@@ -1075,6 +1081,10 @@ fn run_batch_fast(
 ) -> Result<PathBuf, String> {
     let total = inputs.len();
     let mut last = PathBuf::new();
+    // 批量不能因为一个坏文件就全停：以前这里用 `?`，只要有一首是单声道
+    // （或读取失败），后面的歌一首都不会处理，用户只看到一条报错。
+    // 现在逐个处理，坏的记下来继续，最后统一报告。
+    let mut skipped: Vec<String> = Vec::new();
     for (i, input) in inputs.iter().enumerate() {
         let _ = tx.send(Msg::Stage(format!(
             "快速重混 [{}/{}] {}",
@@ -1082,25 +1092,56 @@ fn run_batch_fast(
             total,
             file_name(input)
         )));
-        let buf = upmix_core::fileio::read_any(input).map_err(|e| e.to_string())?;
+        let buf = match upmix_core::fileio::read_any(input) {
+            Ok(b) => b,
+            Err(e) => {
+                skipped.push(format!("{}：读不了（{e}）", file_name(input)));
+                continue;
+            }
+        };
         if buf.num_channels() != 2 {
-            return Err(format!(
-                "{} 是 {} 声道，需要立体声",
+            skipped.push(format!(
+                "{}：{} 声道，需要立体声",
                 file_name(input),
                 buf.num_channels()
             ));
+            continue;
         }
-        let out = Upmixer::new(cfg.clone())
+        // 声道/编码没问题，剩下的错误（写盘失败等）不该被吞——但也不该
+        // 终止整批，同样记下来继续。
+        let processed = Upmixer::new(cfg.clone())
             .process_with_progress(&buf, |a, b| {
                 let _ = tx.send(Msg::Progress(a, b));
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string());
+        let out = match processed {
+            Ok(o) => o,
+            Err(e) => {
+                skipped.push(format!("{}：重混失败（{e}）", file_name(input)));
+                continue;
+            }
+        };
         let out_path = out_path_for(input, outdir);
         prepare(&out_path);
-        upmix_core::fileio::write_any(&out_path, &out, Some(input)).map_err(|e| e.to_string())?;
-        last = out_path;
+        match upmix_core::fileio::write_any(&out_path, &out, Some(input)) {
+            Ok(()) => last = out_path,
+            Err(e) => skipped.push(format!("{}：写盘失败（{e}）", file_name(input))),
+        }
     }
-    Ok(last)
+    if skipped.is_empty() {
+        return Ok(last);
+    }
+    // 全失败才算错；部分成功就把跳过的原因带回去给用户看。
+    if last.as_os_str().is_empty() {
+        Err(format!("全部失败：{}", skipped.join("；")))
+    } else {
+        Err(format!(
+            "完成 {} 首，跳过 {} 首 -> {}",
+            total - skipped.len(),
+            skipped.len(),
+            skipped.join("；")
+        ))
+    }
 }
 
 fn run_batch_auto(
@@ -1112,6 +1153,7 @@ fn run_batch_auto(
 ) -> Result<PathBuf, String> {
     let total = inputs.len();
     let mut last = PathBuf::new();
+    let mut skipped: Vec<String> = Vec::new();
     for (i, input) in inputs.iter().enumerate() {
         let _ = tx.send(Msg::Stage(format!(
             "自动分离 [{}/{}] {}",
@@ -1119,9 +1161,25 @@ fn run_batch_auto(
             total,
             file_name(input)
         )));
-        last = run_one_auto(input, outdir, &model, keep, &tx)?;
+        // 同上：一个文件坏了不能把整批带走。
+        match run_one_auto(input, outdir, &model, keep, &tx) {
+            Ok(p) => last = p,
+            Err(e) => skipped.push(format!("{}：{e}", file_name(input))),
+        }
     }
-    Ok(last)
+    if skipped.is_empty() {
+        return Ok(last);
+    }
+    if last.as_os_str().is_empty() {
+        Err(format!("全部失败：{}", skipped.join("；")))
+    } else {
+        Err(format!(
+            "完成 {} 首，跳过 {} 首 -> {}",
+            total - skipped.len(),
+            skipped.len(),
+            skipped.join("；")
+        ))
+    }
 }
 
 fn run_one_auto(
@@ -1195,14 +1253,19 @@ fn run_one_auto(
     upmix_core::fileio::write_any(&out_path, &out, Some(input)).map_err(|e| e.to_string())?;
     // “保留 stems”：把四轨写一份出来，方便回看。
     if keep {
-        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp)
+            .map_err(|e| format!("建 stems 目录 {} 失败：{e}", tmp.display()))?;
         for (n, b) in [
             ("vocals", &stems.vocals),
             ("drums", &stems.drums),
             ("bass", &stems.bass),
             ("other", &stems.other),
         ] {
-            let _ = upmix_core::fileio::write_any(&tmp.join(format!("{track}_{n}.wav")), b, None);
+            // 以前这里是 `let _ =`：写失败用户完全看不到，开了「保留 stems」
+            // 却什么都没得到，还以为是程序没做。
+            let p = tmp.join(format!("{track}_{n}.wav"));
+            upmix_core::fileio::write_any(&p, b, None)
+                .map_err(|e| format!("写 stems {} 失败：{e}", p.display()))?;
         }
     }
     Ok(out_path)
