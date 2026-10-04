@@ -133,7 +133,10 @@ pub fn vendor_name(vendor_id: u16) -> &'static str {
 fn read_hex_u16(path: &Path) -> Option<u16> {
     let s = std::fs::read_to_string(path).ok()?;
     let s = s.trim();
-    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     u16::from_str_radix(s, 16).ok()
 }
 
@@ -141,7 +144,8 @@ fn read_hex_u16(path: &Path) -> Option<u16> {
 ///
 /// 只认 `/sys/class/drm/card<数字>`，这样 `card1-DP-1` 这类连接器条目会被跳过。
 pub fn list_gpus() -> Vec<GpuInfo> {
-    let mut out = Vec::new();
+    // 显式标注：非 Linux 时下面整块是 cfg 掉的，`Vec::new()` 推不出元素类型。
+    let mut out: Vec<GpuInfo> = Vec::new();
     #[cfg(target_os = "linux")]
     {
         let Ok(rd) = std::fs::read_dir("/sys/class/drm") else {
@@ -243,9 +247,7 @@ pub fn plan(backend: Backend, caps: &Caps, device: Option<u32>) -> Result<EnvPla
                 return Err("CUDA 只支持 Linux 和 Windows".to_string());
             }
             if !caps.cuda_compiled {
-                return Err(
-                    "这个构建没编入 CUDA（发行包用的是纯 CPU 版 ONNX Runtime）".to_string(),
-                );
+                return Err("这个构建没编入 CUDA（发行包用的是纯 CPU 版 ONNX Runtime）".to_string());
             }
             if !caps.nvidia_driver {
                 return Err("没检测到 NVIDIA 驱动（/dev/nvidia0 不存在）".to_string());

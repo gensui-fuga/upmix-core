@@ -135,7 +135,11 @@ impl App {
             if let Some(v) = alpha {
                 app.card_alpha = v.clamp(0.0, 1.0);
             }
-            app.last_saved = Some((id, app.accent.to_srgba_unmultiplied(), (app.card_alpha * 255.0) as u8));
+            app.last_saved = Some((
+                id,
+                app.accent.to_srgba_unmultiplied(),
+                (app.card_alpha * 255.0) as u8,
+            ));
         }
         app
     }
@@ -217,7 +221,11 @@ impl App {
             self.running = false;
             self.rx = None;
             self.progress = 1.0;
-            let secs = self.started.take().map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
+            let secs = self
+                .started
+                .take()
+                .map(|s| s.elapsed().as_secs_f32())
+                .unwrap_or(0.0);
             match r {
                 Ok(p) => {
                     self.status = format!("完成 · {secs:.1}s → {}", p.display());
@@ -248,7 +256,8 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
         if self.running {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(80));
         }
         // 透明度可调：保留卡片原色（霓虹是紫的），只改 alpha。
         if self.theme.layered() {
@@ -385,7 +394,10 @@ impl App {
             theme::hairline(ui, &self.theme);
             ui.add_space(6.0);
             if self.files.is_empty() {
-                ui.label(RichText::new("没找到 .flac/.wav。上面填个音乐文件夹再回车。").color(self.theme.ink3));
+                ui.label(
+                    RichText::new("没找到 .flac/.wav。上面填个音乐文件夹再回车。")
+                        .color(self.theme.ink3),
+                );
             }
             egui::ScrollArea::vertical()
                 .id_salt("filelist")
@@ -395,7 +407,14 @@ impl App {
                         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
                         let sel = self.selected == Some(i);
                         if ui
-                            .selectable_label(sel, RichText::new(name).color(if sel { self.accent } else { self.theme.ink }))
+                            .selectable_label(
+                                sel,
+                                RichText::new(name).color(if sel {
+                                    self.accent
+                                } else {
+                                    self.theme.ink
+                                }),
+                            )
                             .clicked()
                         {
                             self.selected = Some(i);
@@ -425,10 +444,26 @@ impl App {
             ui.add_space(6.0);
             match self.mode {
                 Mode::Fast => {
-                    ui.add(egui::Slider::new(&mut self.lfe_gain_db, -18.0..=6.0).text("LFE 低频增益").suffix(" dB"));
-                    ui.add(egui::Slider::new(&mut self.surround_gain_db, -12.0..=0.0).text("环绕增益").suffix(" dB"));
-                    ui.add(egui::Slider::new(&mut self.surround_delay_ms, 0.0..=30.0).text("环绕延迟").suffix(" ms"));
-                    ui.add(egui::Slider::new(&mut self.vocal_boost_db, 0.0..=6.0).text("人声聚焦").suffix(" dB"));
+                    ui.add(
+                        egui::Slider::new(&mut self.lfe_gain_db, -18.0..=6.0)
+                            .text("LFE 低频增益")
+                            .suffix(" dB"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.surround_gain_db, -12.0..=0.0)
+                            .text("环绕增益")
+                            .suffix(" dB"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.surround_delay_ms, 0.0..=30.0)
+                            .text("环绕延迟")
+                            .suffix(" ms"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.vocal_boost_db, 0.0..=6.0)
+                            .text("人声聚焦")
+                            .suffix(" dB"),
+                    );
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("STFT 窗").color(self.theme.ink2));
                         for w in [1024usize, 2048, 4096, 8192] {
@@ -443,9 +478,17 @@ impl App {
                             ui.selectable_value(&mut self.demucs_model, m.to_string(), m);
                         }
                     });
-                    ui.label(RichText::new("htdemucs 均衡；_ft 最好但更慢；mdx_*_q 量化、更快。").size(12.0).color(self.theme.ink3));
+                    ui.label(
+                        RichText::new("htdemucs 均衡；_ft 最好但更慢；mdx_*_q 量化、更快。")
+                            .size(12.0)
+                            .color(self.theme.ink3),
+                    );
                     ui.checkbox(&mut self.keep_stems, "保留分离出的 stems");
-                    ui.label(RichText::new("路由：人声→中置，鼓/贝斯低频→LFE，other 侧向→环绕。").size(12.0).color(self.theme.ink3));
+                    ui.label(
+                        RichText::new("路由：人声→中置，鼓/贝斯低频→LFE，other 侧向→环绕。")
+                            .size(12.0)
+                            .color(self.theme.ink3),
+                    );
                 }
             }
         });
@@ -459,10 +502,14 @@ impl App {
             ui.add_enabled_ui(enabled, |ui| {
                 if ui
                     .add(
-                        egui::Button::new(RichText::new("▶  开始重混  →  5.1").size(16.0).color(self.theme.card))
-                            .fill(self.accent)
-                            .corner_radius(10)
-                            .min_size(egui::vec2(ui.available_width(), 44.0)),
+                        egui::Button::new(
+                            RichText::new("▶  开始重混  →  5.1")
+                                .size(16.0)
+                                .color(self.theme.card),
+                        )
+                        .fill(self.accent)
+                        .corner_radius(10)
+                        .min_size(egui::vec2(ui.available_width(), 44.0)),
                     )
                     .clicked()
                 {
@@ -648,6 +695,121 @@ impl App {
             self.set_wallpaper(ui.ctx(), &p);
         }
     }
+
+    /// 推理后端选择卡片。
+    ///
+    /// 只列**当前构建真的能跑**的选项：发行包用的是纯 CPU 版 ONNX Runtime，
+    /// stem-splitter-core 又是 default-features=false 编译的，所以 CUDA 在这里
+    /// 会被明确标成不可用并给出原因——而不是让用户点了以后在推理中途吃一个
+    /// "Failed to activate forced execution provider"。
+    fn backend_card(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme.clone();
+        let caps = upmix_core::backend::Caps::detect();
+        let avail = upmix_core::backend::availability(&caps);
+        let mut chosen: Option<upmix_core::backend::Backend> = None;
+        // 闭包里不能碰 self：card().show() 的闭包已经借走了 self.theme 相关，
+        // 再在里面 &mut self.gpu_device 会是两个可变借用。先快照出来。
+        let cur = self.backend;
+        let mut dev = self.gpu_device;
+
+        theme::card(&theme).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("推理后端").size(16.0).color(theme.ink));
+            ui.add_space(2.0);
+            theme::hairline(ui, &theme);
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "选哪套引擎跑**神经网络**源分离（「自动分离」模式）。快速模式是纯 CPU 数学，和这里无关。",
+                )
+                .size(12.5)
+                .color(theme.ink3),
+            );
+            ui.add_space(6.0);
+
+            for (b, reason) in &avail {
+                let usable = reason.is_none();
+                ui.horizontal(|ui| {
+                    let sel = cur == *b;
+                    // egui 0.36 里没有 SelectableLabel 这个 widget 了，用
+                    // add_enabled_ui + selectable_label（后者一直有）。
+                    let clicked = ui
+                        .add_enabled_ui(usable, |ui| ui.selectable_label(sel, b.label()).clicked())
+                        .inner;
+                    if clicked && usable {
+                        chosen = Some(*b);
+                    }
+                    if let Some(r) = reason {
+                        ui.label(RichText::new(format!("不可用：{r}")).size(11.5).color(theme.ink3));
+                    }
+                });
+            }
+
+            // 本机检测到的显卡（只读展示，帮助用户判断该选什么）。
+            ui.add_space(6.0);
+            if caps.gpus.is_empty() {
+                ui.label(RichText::new("没检测到独立显卡信息").size(11.5).color(theme.ink3));
+            } else {
+                let names: Vec<String> = caps
+                    .gpus
+                    .iter()
+                    .map(|g| {
+                        format!(
+                            "{} {} ({:04x}:{:04x})",
+                            g.card,
+                            g.vendor_name(),
+                            g.vendor_id,
+                            g.device_id
+                        )
+                    })
+                    .collect();
+                ui.label(
+                    RichText::new(format!("本机显卡：{}", names.join("、")))
+                        .size(11.5)
+                        .color(theme.ink3),
+                );
+            }
+
+            // CUDA 设备号。只有真的选了 CUDA 才有意义——stem-splitter-core 的
+            // EpKind 没有设备字段，只能靠 CUDA_VISIBLE_DEVICES 限定。
+            if cur == upmix_core::backend::Backend::Cuda {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("显卡序号").color(theme.ink2).size(12.5));
+                    ui.add(egui::DragValue::new(&mut dev).range(0..=7));
+                    ui.label(
+                        RichText::new("（0 是第一块，靠 CUDA_VISIBLE_DEVICES 限定）")
+                            .size(11.5)
+                            .color(theme.ink3),
+                    );
+                });
+            }
+
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "改动在**下次任务**生效；如果本次已经跑过自动分离，需要重启程序（ONNX Runtime 的会话只能建一次）。",
+                )
+                .size(11.5)
+                .color(theme.ink3),
+            );
+        });
+
+        self.gpu_device = dev;
+        if let Some(b) = chosen {
+            match upmix_core::backend::set_backend(b, Some(self.gpu_device)) {
+                Ok(()) => {
+                    self.backend = b;
+                    self.status = format!("推理后端已切到：{}", b.label());
+                    self.status_ok = Some(true);
+                }
+                Err(e) => {
+                    self.status = format!("切不了：{e}");
+                    self.status_ok = Some(false);
+                }
+            }
+        }
+    }
 }
 
 fn tab_tutorial(ui: &mut egui::Ui, t: &Theme) {
@@ -693,108 +855,6 @@ fn tab_tutorial(ui: &mut egui::Ui, t: &Theme) {
 
         ui.add_space(6.0);
     });
-}
-
-/// 推理后端选择卡片。
-///
-/// 只列**当前构建真的能跑**的选项：发行包用的是纯 CPU 版 ONNX Runtime，
-/// stem-splitter-core 又是 default-features=false 编译的，所以 CUDA 在这里
-/// 会被明确标成不可用并给出原因——而不是让用户点了以后在推理中途吃一个
-/// "Failed to activate forced execution provider"。
-fn backend_card(&mut self, ui: &mut egui::Ui) {
-    let theme = self.theme.clone();
-    let caps = upmix_core::backend::Caps::detect();
-    let avail = upmix_core::backend::availability(&caps);
-    let mut chosen: Option<upmix_core::backend::Backend> = None;
-
-    theme::card(&theme).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.label(RichText::new("推理后端").size(16.0).color(theme.ink));
-        ui.add_space(2.0);
-        theme::hairline(ui, &theme);
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new(
-                "选哪套引擎跑**神经网络**源分离（「自动分离」模式）。快速模式是纯 CPU 数学，和这里无关。",
-            )
-            .size(12.5)
-            .color(theme.ink3),
-        );
-        ui.add_space(6.0);
-
-        for (b, reason) in &avail {
-            let usable = reason.is_none();
-            ui.horizontal(|ui| {
-                let sel = self.backend == *b;
-                // egui 0.36 里没有 SelectableLabel 这个 widget 了，用
-                // add_enabled_ui + selectable_label（后者一直有）。
-                let clicked = ui
-                    .add_enabled_ui(usable, |ui| ui.selectable_label(sel, b.label()).clicked())
-                    .inner;
-                if clicked && usable {
-                    chosen = Some(*b);
-                }
-                if let Some(r) = reason {
-                    ui.label(RichText::new(format!("不可用：{r}")).size(11.5).color(theme.ink3));
-                }
-            });
-        }
-
-        // 本机检测到的显卡（只读展示，帮助用户判断该选什么）。
-        ui.add_space(6.0);
-        if caps.gpus.is_empty() {
-            ui.label(RichText::new("没检测到独立显卡信息").size(11.5).color(theme.ink3));
-        } else {
-            let names: Vec<String> = caps
-                .gpus
-                .iter()
-                .map(|g| format!("{} {} ({:04x}:{:04x})", g.card, g.vendor_name(), g.vendor_id, g.device_id))
-                .collect();
-            ui.label(
-                RichText::new(format!("本机显卡：{}", names.join("、")))
-                    .size(11.5)
-                    .color(theme.ink3),
-            );
-        }
-
-        // CUDA 设备号。只有真的选了 CUDA 才有意义——stem-splitter-core 的
-        // EpKind 没有设备字段，只能靠 CUDA_VISIBLE_DEVICES 限定。
-        if self.backend == upmix_core::backend::Backend::Cuda {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("显卡序号").color(theme.ink2).size(12.5));
-                ui.add(egui::DragValue::new(&mut self.gpu_device).range(0..=7));
-                ui.label(
-                    RichText::new("（0 是第一块，靠 CUDA_VISIBLE_DEVICES 限定）")
-                        .size(11.5)
-                        .color(theme.ink3),
-                );
-            });
-        }
-
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new(
-                "改动在**下次任务**生效；如果本次已经跑过自动分离，需要重启程序（ONNX Runtime 的会话只能建一次）。",
-            )
-            .size(11.5)
-            .color(theme.ink3),
-        );
-    });
-
-    if let Some(b) = chosen {
-        match upmix_core::backend::set_backend(b, Some(self.gpu_device)) {
-            Ok(()) => {
-                self.backend = b;
-                self.status = format!("推理后端已切到：{}", b.label());
-                self.status_ok = Some(true);
-            }
-            Err(e) => {
-                self.status = format!("切不了：{e}");
-                self.status_ok = Some(false);
-            }
-        }
-    }
 }
 
 /// 选多个音频文件——调系统自己的文件对话框。
@@ -845,7 +905,9 @@ fn zenity_dialog(dir: bool) -> Vec<PathBuf> {
             .arg("--file-filter=所有文件 | *")
             .arg("--title=选择音乐文件（可多选）");
     }
-    let Ok(out) = c.output() else { return Vec::new() };
+    let Ok(out) = c.output() else {
+        return Vec::new();
+    };
     if !out.status.success() {
         return Vec::new();
     }
@@ -925,7 +987,9 @@ fn load_config() -> Option<(String, Option<[u8; 4]>, Option<f32>)> {
     let mut accent: Option<[u8; 4]> = None;
     let mut alpha: Option<f32> = None;
     for line in txt.lines() {
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         let v = v.trim();
         match k.trim() {
             "theme" => theme = v.to_string(),
@@ -959,7 +1023,10 @@ fn save_config(theme_id: &str, accent: egui::Color32, alpha: f32) {
 }
 
 fn out_path_for(input: &Path, outdir: &str) -> PathBuf {
-    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("track");
     let name = format!("{stem}_5.1.flac");
     if outdir.is_empty() {
         input.with_file_name(name)
@@ -983,10 +1050,19 @@ fn run_batch_fast(
     let total = inputs.len();
     let mut last = PathBuf::new();
     for (i, input) in inputs.iter().enumerate() {
-        let _ = tx.send(Msg::Stage(format!("快速重混 [{}/{}] {}", i + 1, total, file_name(input))));
+        let _ = tx.send(Msg::Stage(format!(
+            "快速重混 [{}/{}] {}",
+            i + 1,
+            total,
+            file_name(input)
+        )));
         let buf = upmix_core::fileio::read_any(input).map_err(|e| e.to_string())?;
         if buf.num_channels() != 2 {
-            return Err(format!("{} 是 {} 声道，需要立体声", file_name(input), buf.num_channels()));
+            return Err(format!(
+                "{} 是 {} 声道，需要立体声",
+                file_name(input),
+                buf.num_channels()
+            ));
         }
         let out = Upmixer::new(cfg.clone())
             .process_with_progress(&buf, |a, b| {
@@ -1011,7 +1087,12 @@ fn run_batch_auto(
     let total = inputs.len();
     let mut last = PathBuf::new();
     for (i, input) in inputs.iter().enumerate() {
-        let _ = tx.send(Msg::Stage(format!("自动分离 [{}/{}] {}", i + 1, total, file_name(input))));
+        let _ = tx.send(Msg::Stage(format!(
+            "自动分离 [{}/{}] {}",
+            i + 1,
+            total,
+            file_name(input)
+        )));
         last = run_one_auto(input, outdir, &model, keep, &tx)?;
     }
     Ok(last)
@@ -1026,7 +1107,10 @@ fn run_one_auto(
 ) -> Result<PathBuf, String> {
     let tmp = std::env::temp_dir().join("upmix-stem-cache");
     std::fs::create_dir_all(&tmp).ok();
-    let track = input.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+    let track = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("track");
 
     let _ = tmp;
     let _ = model;
@@ -1092,18 +1176,17 @@ fn run_one_auto(
             ("bass", &stems.bass),
             ("other", &stems.other),
         ] {
-            let _ = upmix_core::fileio::write_any(
-                &tmp.join(format!("{track}_{n}.wav")),
-                b,
-                None,
-            );
+            let _ = upmix_core::fileio::write_any(&tmp.join(format!("{track}_{n}.wav")), b, None);
         }
     }
     Ok(out_path)
 }
 
 fn file_name(p: &Path) -> String {
-    p.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string()
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?")
+        .to_string()
 }
 
 fn default_music_dir() -> String {
@@ -1131,7 +1214,9 @@ fn scan_dir(dir: &str) -> Vec<PathBuf> {
 }
 
 fn collect(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
