@@ -222,6 +222,27 @@ mod tests {
         let front = norm(crate::upmix::CH_FL);
         assert!(front > 0.0, "左前应该有鼓声");
         let ratio = lfe / front;
+        // 和历史上的弱配置比：默认值不该比 -6dB/120Hz 还弱。
+        // 用相对比较，免得写死的绝对阈值随公式微调就误报。
+        let weak = route(
+            &stems,
+            &StemRouting {
+                lfe_gain_db: -6.0,
+                lfe_hz: 120.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let weak_norm =
+            |ch: usize| -> f64 { weak.data[ch].iter().map(|x| x * x).sum::<f64>().sqrt() };
+        let weak_ratio = weak_norm(crate::upmix::CH_LFE) / weak_norm(crate::upmix::CH_FL);
+        assert!(
+            ratio > weak_ratio * 1.15,
+            "默认 LFE 只比 -6dB/120Hz 强 {:.0}%（{:.3} vs {:.3}），等于没改",
+            (ratio / weak_ratio - 1.0) * 100.0,
+            ratio,
+            weak_ratio
+        );
         assert!(
             ratio > 0.4,
             "LFE 相对主声道只有 {:.3}（{:.1} dB），低音炮会听不见",

@@ -589,4 +589,56 @@ mod tests {
             assert!(ch.iter().all(|v| v.is_finite()), "non-finite sample");
         }
     }
+
+    /// 回归测试：快速模式的默认 LFE 不能弱到听不见。
+    ///
+    /// 用户反馈"低音没声音"时默认是 -6dB/120Hz：LFE 相对主声道约 -9dB，
+    /// 而普通音乐的低音感很大一部分在 80-250Hz，120Hz 截止把它挡在门外。
+    /// 这个测试盯着"不能比 -6dB/120Hz 更弱"这条底线。
+    #[test]
+    fn default_lfe_is_stronger_than_the_weak_legacy_setting() {
+        let sr = 48000;
+        let n = 48000;
+        // 60Hz 底鼓，左右相同。
+        let sig: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 60.0 * i as f64 / sr as f64).sin() * 0.3)
+            .collect();
+        let input = AudioBuffer {
+            sample_rate: sr,
+            bits_per_sample: 16,
+            data: vec![sig.clone(), sig],
+        };
+        let rms = |buf: &AudioBuffer, ch: usize| -> f64 {
+            (buf.data[ch].iter().map(|x| x * x).sum::<f64>() / n as f64).sqrt()
+        };
+
+        let now = Upmixer::new(UpmixConfig::default())
+            .process(&input)
+            .unwrap();
+        let weak = Upmixer::new(UpmixConfig {
+            lfe_gain_db: -6.0,
+            lfe_high_hz: 120.0,
+            ..Default::default()
+        })
+        .process(&input)
+        .unwrap();
+
+        let now_ratio = rms(&now, CH_LFE) / rms(&now, CH_FL);
+        let weak_ratio = rms(&weak, CH_LFE) / rms(&weak, CH_FL);
+        assert!(
+            now_ratio > weak_ratio * 1.15,
+            "默认 LFE 只比旧的 -6dB/120Hz 强 {:.0}%（{:.3} vs {:.3}），等于没改",
+            (now_ratio / weak_ratio - 1.0) * 100.0,
+            now_ratio,
+            weak_ratio
+        );
+        // 主声道不能被牺牲掉来换低音（120-200Hz 那点摊薄必须在 1dB 内）。
+        let front_now = rms(&now, CH_FL);
+        let front_weak = rms(&weak, CH_FL);
+        assert!(
+            (20.0 * (front_now / front_weak).log10()).abs() < 1.0,
+            "主声道电平被动了 {:.2} dB，超出可接受范围",
+            20.0 * (front_now / front_weak).log10()
+        );
+    }
 }
