@@ -88,8 +88,11 @@ upmix-core 歌.flac --outdir ~/Music/51/
 # 批量处理整张专辑
 upmix-core --batch ~/Music/album --outdir ~/Music/album_51 --mode fast --skip-existing
 
-# mp3 / m4a / ogg 也吃（用自带的 ffmpeg 解码）
+# mp3 / m4a / ogg / opus 也吃（用自带的 ffmpeg 解码）
 upmix-core 歌.mp3 -o 出.flac
+
+# 指定推理后端（只影响 --mode auto 的神经网络部分）
+upmix-core 歌.flac -o 出.flac --mode auto --backend cpu
 ```
 
 **常用参数**：
@@ -99,13 +102,20 @@ upmix-core 歌.mp3 -o 出.flac
 | `--mode fast\|auto` | 处理模式，默认 `fast` |
 | `-o, --output <FILE>` | 单文件输出路径 |
 | `--outdir <DIR>` | 输出目录（默认源文件旁边） |
-| `--batch <DIR>` | 批量处理目录里所有 .flac/.wav |
+| `--batch <DIR>` | 批量处理目录里所有音频（flac/wav/mp3/m4a/ogg/opus…） |
 | `--format flac\|wav` | 输出格式 |
+| `--backend auto\|cpu\|cuda\|directml\|coreml` | 推理后端，默认 `auto`（自己探测，失败退回 CPU） |
+| `--gpu-device <N>` | CUDA 用第几块显卡（从 0 开始） |
 | `--skip-existing` | 批量时跳过已存在的输出 |
 | `--lfe-gain-db` / `--surround-gain-db` | LFE / 环绕增益 |
 | `--keep-stems` | 保留分离出的四轨（回看用） |
 | `--prepare-model --outdir models` | 只把模型下载到 `models/`（打包用） |
 | `--external-demucs` | 改用外挂的 Python demucs（默认**不用**，只有你自己装了才需要） |
+
+**元数据**：源文件的标签、封面、歌词会**原样带进输出**，Flac / WAV / MP3 / M4A / OGG / OPUS 输入都一样；输入旁边的同名 `.lrc` 会跟着输出改名（`song.lrc` → `song_5.1.lrc`）。
+
+**关于 `--backend`**：发行包用的是**纯 CPU** 的 ONNX Runtime，所以 `cuda` / `directml` / `coreml` 会明确告诉你"这个构建没编入"，而不是中途崩。想用显卡要自己带相应 feature 编译，并配对应的 GPU 版 ORT。
+
 
 **主题也可以在启动时指定**：
 
