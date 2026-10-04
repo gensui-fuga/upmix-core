@@ -279,10 +279,20 @@ pub fn plan(backend: Backend, caps: &Caps, device: Option<u32>) -> Result<EnvPla
 
     // 设备号只对 CUDA 有意义：EpKind 里没有设备字段，只能用
     // CUDA_VISIBLE_DEVICES 让 CUDA 只看见指定的那块。
-    if let Some(d) = device {
-        if matches!(backend, Backend::Cuda) || (backend == Backend::Auto && d > 0) {
-            p.set.push(("CUDA_VISIBLE_DEVICES", d.to_string()));
-        }
+    let want_device = match backend {
+        Backend::Cuda => device,
+        // Auto 下 device 只在明确选了非 0 号卡时才有意义。
+        Backend::Auto => device.filter(|d| *d > 0),
+        Backend::Cpu | Backend::DirectMl | Backend::CoreMl => None,
+    };
+    match want_device {
+        Some(d) => p.set.push(("CUDA_VISIBLE_DEVICES", d.to_string())),
+        // 关键：不设的时候要主动清掉。否则从「CUDA 设备 1」切回 CPU/Auto 后，
+        // 上次设的 CUDA_VISIBLE_DEVICES=1 会留在环境里，之后再用 CUDA 就永远
+        // 只能看见第 1 块卡——设置漏清的经典坑。
+        // apply_pending 只清 OURS 里记着的键，所以用户 shell 自己 export 的
+        // 不会被误动。
+        None => p.unset.push("CUDA_VISIBLE_DEVICES"),
     }
 
     Ok(p)
@@ -454,6 +464,57 @@ mod tests {
         // 选 CPU 时设备号没意义，不该写出 CUDA_VISIBLE_DEVICES 误导人。
         let p = plan(Backend::Cpu, &caps_cpu_only(), Some(1)).unwrap();
         assert!(!p.set.iter().any(|(k, _)| *k == "CUDA_VISIBLE_DEVICES"));
+        // 而且必须主动清掉——这一条以前漏了，导致从 CUDA 切回 CPU 后
+        // CUDA_VISIBLE_DEVICES=1 残留在环境里。
+        assert!(
+            p.unset.contains(&"CUDA_VISIBLE_DEVICES"),
+            "切到 CPU 时没有清 CUDA_VISIBLE_DEVICES：{:?}",
+            p.unset
+        );
+    }
+
+    /// 回归测试：切换后端不能让上一次设的环境变量残留。
+    ///
+    /// 真实场景：用户先用「CUDA 设备 1」，再切回「自动」。如果切回时不清
+    /// CUDA_VISIBLE_DEVICES，之后 CUDA 就永远只看得见第 1 块卡了。
+    #[test]
+    fn switching_away_from_cuda_clears_visible_devices() {
+        let caps = caps_cuda_ready();
+
+        // 先选 CUDA 设备 1
+        let a = plan(Backend::Cuda, &caps, Some(1)).unwrap();
+        assert!(a.set.contains(&("CUDA_VISIBLE_DEVICES", "1".to_string())));
+
+        // 切回 Auto 且不带设备号（界面默认就是 0/未指定）：必须把它清掉
+        let b = plan(Backend::Auto, &caps, None).unwrap();
+        assert!(
+            !b.set.iter().any(|(k, _)| *k == "CUDA_VISIBLE_DEVICES"),
+            "Auto 不带设备号时不该设 CUDA_VISIBLE_DEVICES"
+        );
+        assert!(
+            b.unset.contains(&"CUDA_VISIBLE_DEVICES"),
+            "从 CUDA 切回 Auto 没清 CUDA_VISIBLE_DEVICES：{:?}",
+            b.unset
+        );
+
+        // Auto + 设备号 0 同样要清
+        let c = plan(Backend::Auto, &caps, Some(0)).unwrap();
+        assert!(c.unset.contains(&"CUDA_VISIBLE_DEVICES"));
+
+        // 切到 CPU 也要清
+        let d = plan(Backend::Cpu, &caps, Some(1)).unwrap();
+        assert!(d.unset.contains(&"CUDA_VISIBLE_DEVICES"));
+
+        // Cuda 但不指定设备号时也要清（避免留着上一块卡的编号）
+        let e = plan(Backend::Cuda, &caps, None).unwrap();
+        assert!(e.unset.contains(&"CUDA_VISIBLE_DEVICES"));
+    }
+
+    /// Auto + 非 0 设备号仍然要能设（这是唯一"自动模式也能选卡"的途径）。
+    #[test]
+    fn auto_with_nonzero_device_still_sets_visible_devices() {
+        let p = plan(Backend::Auto, &caps_cuda_ready(), Some(2)).unwrap();
+        assert!(p.set.contains(&("CUDA_VISIBLE_DEVICES", "2".to_string())));
     }
 
     #[test]
