@@ -55,7 +55,7 @@ impl App {
         Self {
             input,
             params: vec![
-                Param { name: "LFE gain", value: -6.0, min: -18.0, max: 6.0, step: 1.0, unit: "dB" },
+                Param { name: "LFE gain", value: -3.0, min: -18.0, max: 6.0, step: 1.0, unit: "dB" },
                 Param { name: "Surround gain", value: -3.0, min: -12.0, max: 0.0, step: 0.5, unit: "dB" },
                 Param { name: "Surround delay", value: 12.0, min: 0.0, max: 30.0, step: 1.0, unit: "ms" },
                 Param { name: "Vocal focus", value: 2.0, min: 0.0, max: 6.0, step: 0.5, unit: "dB" },

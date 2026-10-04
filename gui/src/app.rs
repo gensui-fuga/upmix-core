@@ -108,7 +108,7 @@ impl App {
             accent: theme.accent,
             theme,
             theme_idx: 0,
-            lfe_gain_db: -6.0,
+            lfe_gain_db: -3.0,
             surround_gain_db: -3.0,
             surround_delay_ms: 12.0,
             vocal_boost_db: 2.0,
