@@ -98,6 +98,16 @@ pub struct Cli {
     #[arg(long)]
     pub skip_existing: bool,
 
+    /// 推理后端：auto | cpu | cuda | directml | coreml。
+    /// auto 交给程序自己探测（失败会退回 CPU，最稳）；其余为强制指定，
+    /// 当前构建不支持或本机没有对应硬件时会直接报错并说明原因。
+    #[arg(long, default_value = "auto")]
+    pub backend: String,
+
+    /// CUDA 用第几块显卡（从 0 开始，仅 --backend cuda 时有意义）。
+    #[arg(long)]
+    pub gpu_device: Option<u32>,
+
     #[arg(short, long)]
     pub quiet: bool,
 }
@@ -142,6 +152,17 @@ pub fn run() -> Result<()> {
     }
     if !matches!(cli.format.as_str(), "flac" | "wav") {
         bail!("unknown --format '{}' (flac|wav)", cli.format);
+    }
+    // 后端选择：只接受已知 id，并且要求当前构建/本机真的可行——否则宁可现在
+    // 报错，也不要等到推理中途吃一个 "Failed to activate forced execution
+    // provider"。
+    match crate::backend::Backend::from_id(&cli.backend) {
+        Some(b) => crate::backend::set_backend(b, cli.gpu_device)
+            .map_err(|e| anyhow::anyhow!("--backend {} 不可用：{e}", cli.backend))?,
+        None => bail!(
+            "unknown --backend '{}' (auto|cpu|cuda|directml|coreml)",
+            cli.backend
+        ),
     }
 
     let t0 = Instant::now();

@@ -91,6 +91,20 @@ pub fn separate(buf: &AudioBuffer) -> Result<StemAudio> {
     )?;
     let handle = local_handle(&dir).context("models/ 里的 manifest.json 或 *.onnx 读不了")?;
 
+    // 后端选择必须在 preload 之前落地：ORT 的 EP 是在建会话时定的，而且
+    // preload 本身是一次性（OnceCell）的，跑过就换不了。
+    match crate::backend::apply_pending() {
+        Ok(b) => {
+            if b != crate::backend::Backend::Auto {
+                eprintln!("ℹ️  推理后端：{}", crate::backend::describe());
+            }
+        }
+        Err(e) => {
+            // 选择不可行时回退自动，绝不让推理挂掉。
+            eprintln!("warning: {e}；本次改用自动选择");
+        }
+    }
+
     stem_splitter_core::core::engine::preload(&handle)
         .map_err(|e| anyhow::anyhow!("加载 ONNX 模型失败: {e}"))?;
 

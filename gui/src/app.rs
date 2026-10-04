@@ -58,6 +58,10 @@ pub struct App {
     outdir: String,
     batch: bool,
 
+    // 推理后端（自动 / CPU / GPU）。改动在下次任务生效，已跑过推理则需重启。
+    backend: upmix_core::backend::Backend,
+    gpu_device: u32,
+
     // wallpaper
     wallpaper: Option<egui::TextureHandle>,
     wallpaper_path: String,
@@ -107,6 +111,8 @@ impl App {
             indir,
             outdir: String::new(),
             batch: false,
+            backend: upmix_core::backend::Backend::Auto,
+            gpu_device: 0,
             wallpaper: None,
             wallpaper_path: String::new(),
             wallpaper_msg: None,
@@ -586,6 +592,12 @@ impl App {
 
         ui.add_space(12.0);
 
+        // 推理后端。GUI 本身是 egui 画的，开销可忽略；这里选的是**跑神经网络
+        // 源分离**用哪套执行后端。
+        self.backend_card(ui);
+
+        ui.add_space(12.0);
+
         // wallpaper
         let mut do_load = false;
         let mut do_clear = false;
@@ -683,7 +695,107 @@ fn tab_tutorial(ui: &mut egui::Ui, t: &Theme) {
     });
 }
 
-// ---- workers ----
+/// 推理后端选择卡片。
+///
+/// 只列**当前构建真的能跑**的选项：发行包用的是纯 CPU 版 ONNX Runtime，
+/// stem-splitter-core 又是 default-features=false 编译的，所以 CUDA 在这里
+/// 会被明确标成不可用并给出原因——而不是让用户点了以后在推理中途吃一个
+/// "Failed to activate forced execution provider"。
+fn backend_card(&mut self, ui: &mut egui::Ui) {
+    let theme = self.theme.clone();
+    let caps = upmix_core::backend::Caps::detect();
+    let avail = upmix_core::backend::availability(&caps);
+    let mut chosen: Option<upmix_core::backend::Backend> = None;
+
+    theme::card(&theme).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("推理后端").size(16.0).color(theme.ink));
+        ui.add_space(2.0);
+        theme::hairline(ui, &theme);
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(
+                "选哪套引擎跑**神经网络**源分离（「自动分离」模式）。快速模式是纯 CPU 数学，和这里无关。",
+            )
+            .size(12.5)
+            .color(theme.ink3),
+        );
+        ui.add_space(6.0);
+
+        for (b, reason) in &avail {
+            let usable = reason.is_none();
+            ui.horizontal(|ui| {
+                let sel = self.backend == *b;
+                // egui 0.36 里没有 SelectableLabel 这个 widget 了，用
+                // add_enabled_ui + selectable_label（后者一直有）。
+                let clicked = ui
+                    .add_enabled_ui(usable, |ui| ui.selectable_label(sel, b.label()).clicked())
+                    .inner;
+                if clicked && usable {
+                    chosen = Some(*b);
+                }
+                if let Some(r) = reason {
+                    ui.label(RichText::new(format!("不可用：{r}")).size(11.5).color(theme.ink3));
+                }
+            });
+        }
+
+        // 本机检测到的显卡（只读展示，帮助用户判断该选什么）。
+        ui.add_space(6.0);
+        if caps.gpus.is_empty() {
+            ui.label(RichText::new("没检测到独立显卡信息").size(11.5).color(theme.ink3));
+        } else {
+            let names: Vec<String> = caps
+                .gpus
+                .iter()
+                .map(|g| format!("{} {} ({:04x}:{:04x})", g.card, g.vendor_name(), g.vendor_id, g.device_id))
+                .collect();
+            ui.label(
+                RichText::new(format!("本机显卡：{}", names.join("、")))
+                    .size(11.5)
+                    .color(theme.ink3),
+            );
+        }
+
+        // CUDA 设备号。只有真的选了 CUDA 才有意义——stem-splitter-core 的
+        // EpKind 没有设备字段，只能靠 CUDA_VISIBLE_DEVICES 限定。
+        if self.backend == upmix_core::backend::Backend::Cuda {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("显卡序号").color(theme.ink2).size(12.5));
+                ui.add(egui::DragValue::new(&mut self.gpu_device).range(0..=7));
+                ui.label(
+                    RichText::new("（0 是第一块，靠 CUDA_VISIBLE_DEVICES 限定）")
+                        .size(11.5)
+                        .color(theme.ink3),
+                );
+            });
+        }
+
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(
+                "改动在**下次任务**生效；如果本次已经跑过自动分离，需要重启程序（ONNX Runtime 的会话只能建一次）。",
+            )
+            .size(11.5)
+            .color(theme.ink3),
+        );
+    });
+
+    if let Some(b) = chosen {
+        match upmix_core::backend::set_backend(b, Some(self.gpu_device)) {
+            Ok(()) => {
+                self.backend = b;
+                self.status = format!("推理后端已切到：{}", b.label());
+                self.status_ok = Some(true);
+            }
+            Err(e) => {
+                self.status = format!("切不了：{e}");
+                self.status_ok = Some(false);
+            }
+        }
+    }
+}
 
 /// 选多个音频文件——调系统自己的文件对话框。
 fn pick_audio_files() -> Vec<PathBuf> {

@@ -19,3 +19,15 @@ flacenc.workspace = true
 rayon = "1.10"
 stem-splitter-core.workspace = true
 serde_json = "1"
+
+[features]
+# 推理后端的 GPU 支持，**默认全关**。
+#
+# 为什么默认关：发行包用的是自编的纯 CPU 版 ONNX Runtime，ort 的 cuda/directml
+# /coreml feature 一旦打开，链接期就要求对应的 GPU 版 ORT 和厂商库；而且
+# stem-splitter-core 用 STEMMER_EP_FORCE 强制指定 EP 时失败是硬报错，没有回退。
+# 所以 GPU 版应当作为单独的包（upmix-core-cuda / -directml）去编，不要混进
+# 这个"解压即用"的 CPU 包。见 core/src/backend.rs 的模块注释。
+gpu-cuda = ["stem-splitter-core/cuda"]
+gpu-directml = ["stem-splitter-core/directml"]
+gpu-coreml = ["stem-splitter-core/coreml"]

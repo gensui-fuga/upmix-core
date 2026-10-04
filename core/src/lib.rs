@@ -14,6 +14,7 @@ pub mod upmix;
 pub mod auto;
 pub mod builtin_sep;
 pub mod metadata;
+pub mod backend;
 pub mod cli;
 
 /// Format-agnostic file IO helpers shared by the CLI, TUI and Android builds.
