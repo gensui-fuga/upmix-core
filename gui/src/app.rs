@@ -61,6 +61,13 @@ pub struct App {
     // 推理后端（自动 / CPU / GPU）。改动在下次任务生效，已跑过推理则需重启。
     backend: upmix_core::backend::Backend,
     gpu_device: u32,
+    /// 后端能力探测结果的缓存。
+    ///
+    /// egui 是立即模式：`backend_card` 每帧都会跑。而 `Caps::detect()` 要
+    /// read_dir("/sys/class/drm") 再逐卡读 vendor/device 文件——放在每帧就是
+    /// 每秒几十次目录扫描。这些信息（编进来的 feature、显卡列表、驱动在不在）
+    /// 运行期不会变，探一次存着就够。用户在设置页点"重新探测"才刷新。
+    caps: upmix_core::backend::Caps,
 
     // wallpaper
     wallpaper: Option<egui::TextureHandle>,
@@ -113,6 +120,7 @@ impl App {
             batch: false,
             backend: upmix_core::backend::Backend::Auto,
             gpu_device: 0,
+            caps: upmix_core::backend::Caps::detect(),
             wallpaper: None,
             wallpaper_path: String::new(),
             wallpaper_msg: None,
@@ -704,9 +712,11 @@ impl App {
     /// "Failed to activate forced execution provider"。
     fn backend_card(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
-        let caps = upmix_core::backend::Caps::detect();
+        // 用缓存的能力快照，不要每帧去扫 /sys/class/drm（egui 是立即模式）。
+        let caps = self.caps.clone();
         let avail = upmix_core::backend::availability(&caps);
         let mut chosen: Option<upmix_core::backend::Backend> = None;
+        let mut rescan = false;
         // 闭包里不能碰 self：card().show() 的闭包已经借走了 self.theme 相关，
         // 再在里面 &mut self.gpu_device 会是两个可变借用。先快照出来。
         let cur = self.backend;
@@ -793,9 +803,25 @@ impl App {
                 .size(11.5)
                 .color(theme.ink3),
             );
+
+            // 插了显卡、装了驱动之后要能刷新——探测结果是缓存的，不每帧扫。
+            ui.add_space(4.0);
+            if ui
+                .button(RichText::new("重新探测硬件").size(12.0))
+                .on_hover_text("插拔显卡或装了驱动之后点这里；不然用的是启动时的结果")
+                .clicked()
+            {
+                rescan = true;
+            }
         });
 
         self.gpu_device = dev;
+        if rescan {
+            self.caps = upmix_core::backend::Caps::detect();
+            let n = self.caps.gpus.len();
+            self.status = format!("已重新探测：发现 {n} 块显卡");
+            self.status_ok = Some(true);
+        }
         if let Some(b) = chosen {
             match upmix_core::backend::set_backend(b, Some(self.gpu_device)) {
                 Ok(()) => {
