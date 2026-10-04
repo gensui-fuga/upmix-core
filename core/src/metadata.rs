@@ -576,6 +576,33 @@ pub fn inject_into_wav(path: &Path, source: Option<&Path>) -> Result<()> {
 // 侧车歌词（.lrc）
 // =====================================================================
 
+/// 两个路径是不是同一个已存在的文件。
+///
+/// Unix 上比 (dev, ino)——这是唯一可靠的办法：`PathBuf` 的 `==` 是按组件
+/// 字符串比的，`./a.lrc` 和 `a.lrc`、`x/../a.lrc` 和 `a.lrc` 都不相等，
+/// 但它们是同一个文件。Windows 上退回规范化路径比较。
+///
+/// 两边都必须已存在才能判定；有一个不存在就返回 false（那就不可能是"同一个
+/// 已存在的文件"，后续 copy 也不会自毁）。
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+            return false;
+        };
+        ma.dev() == mb.dev() && ma.ino() == mb.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows 没有稳定的 inode 接口，用规范化路径兜底。
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(ca), Ok(cb)) => ca == cb,
+            _ => false,
+        }
+    }
+}
+
 /// 输入旁边如果有同名 `.lrc`，把它拷到输出旁边（改成输出的名字）。
 ///
 /// 播放器是按“音频文件名”去找歌词的：`song_5.1.flac` 要配 `song_5.1.lrc`。
@@ -620,7 +647,13 @@ pub fn copy_sidecar_lyrics(output: &Path, source: &Path) {
             Some(d) if !d.as_os_str().is_empty() => d.join(format!("{out_stem}.lrc")),
             _ => PathBuf::from(format!("{out_stem}.lrc")),
         };
-        if dest == p {
+        // 别把源和目标是同一个文件的情况漏掉。
+        //
+        // `std::fs::copy` 在 Linux 上不检查同文件：它用 O_TRUNC 打开目标再读源，
+        // 于是 copy(a, a) 把文件截成 0 字节，歌词直接没了。而 `dest == p` 这种
+        // PathBuf 比较是逐组件比的，`./song.lrc` 与 `song.lrc` 并不相等（源那边
+        // 走 read_dir('.') 会带上前导 "./"），所以相对路径调用时这层防护形同虚设。
+        if same_file(&p, &dest) {
             continue; // 同名同地（比如原地覆盖），不用动
         }
         if let Err(err) = std::fs::copy(&p, &dest) {
@@ -808,6 +841,55 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&src);
+    }
+
+    /// 回归测试：源和目标是同一个 `.lrc` 时不能把它清空。
+    ///
+    /// `std::fs::copy` 在 Linux 上不检查同文件：它用 O_TRUNC 打开目标再读源，
+    /// 于是 copy(a, a) 把文件截成 0 字节。而原来的防护 `dest == p` 是按组件比
+    /// PathBuf 的，`./song.lrc` 与 `song.lrc` 不相等（源走 read_dir('.') 会带上
+    /// "./"），相对路径调用时根本拦不住——歌词会被静默清空。
+    #[test]
+    fn sidecar_copy_does_not_truncate_same_file() {
+        let dir = std::env::temp_dir().join(format!("upmix-lrc-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let lrc = dir.join("song.lrc");
+        std::fs::write(&lrc, b"[00:01]precious").unwrap();
+        // 输出名就是源名（原地覆盖），此时 dest 与源是同一个文件。
+        let audio = dir.join("song.lrc");
+        copy_sidecar_lyrics(&lrc, &audio);
+
+        let after = std::fs::read(&lrc).unwrap();
+        assert_eq!(
+            after,
+            b"[00:01]precious",
+            "同名覆盖时 .lrc 被清空了（长度 {}）",
+            after.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 相对路径（不带目录分隔符）调用时，源与目标同样要判定为同一文件。
+    #[test]
+    fn same_file_handles_dot_prefix() {
+        let dir = std::env::temp_dir().join(format!("upmix-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.lrc");
+        std::fs::write(&f, b"x").unwrap();
+
+        // 同一文件的不同写法都必须判定相等。
+        let dotted = dir.join(".").join("a.lrc");
+        assert!(same_file(&f, &f));
+        assert!(same_file(&f, &dotted), "a.lrc 与 ./a.lrc 应视为同一文件");
+        assert!(!same_file(&f, &dir.join("b.lrc")));
+        // 不存在的路径不能误判成同一文件。
+        assert!(!same_file(&f, &dir.join("nope.lrc")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
