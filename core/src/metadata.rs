@@ -99,7 +99,27 @@ fn build_vorbis(vendor: &str, comments: &[String]) -> Vec<u8> {
     out
 }
 
-/// 从捐赠者的元数据块里摘出 `KEY=value` 标签（不含封面）。
+/// 容器自己的技术键，不是用户标签。m4a 尤其爱往外吐这些：抽捐赠者时
+/// `-map_metadata` 会把它们一起搬过来，不滤掉用户输出里就会多出
+/// `handler_name=SoundHandler` / `language=und` 这种垃圾。
+const CONTAINER_NOISE: &[&str] = &[
+    "major_brand",
+    "minor_version",
+    "compatible_brands",
+    "handler_name",
+    "vendor_id",
+    "language",
+    "creation_time",
+];
+
+fn is_container_noise(comment: &str) -> bool {
+    match comment.split_once('=') {
+        Some((k, _)) => CONTAINER_NOISE.contains(&k.trim().to_ascii_lowercase().as_str()),
+        None => true, // 没有 '=' 的畸形条目直接丢
+    }
+}
+
+/// 从捐赠者的元数据块里摘出 `KEY=value` 标签（不含封面，也不含容器噪声）。
 pub fn tags_from_blocks(blocks: &[Block]) -> Vec<String> {
     let mut comments = Vec::new();
     for (typ, data) in blocks {
@@ -107,6 +127,7 @@ pub fn tags_from_blocks(blocks: &[Block]) -> Vec<String> {
             comments.extend(parse_vorbis(data));
         }
     }
+    comments.retain(|c| !is_container_noise(c));
     comments
 }
 
@@ -121,7 +142,12 @@ pub fn build_output_blocks(source: &[Block], extra_tags: &[String]) -> Vec<Block
 
     for (typ, data) in source {
         match *typ {
-            T_VORBIS_COMMENT => comments.extend(parse_vorbis(data)),
+            T_VORBIS_COMMENT => {
+                // 同样要滤容器噪声，否则 m4a 会把 handler_name 带进 FLAC。
+                let mut c = parse_vorbis(data);
+                c.retain(|x| !is_container_noise(x));
+                comments.extend(c);
+            }
             T_PICTURE | T_APPLICATION => out.push((*typ, data.clone())),
             _ => {}
         }
@@ -599,5 +625,21 @@ mod tests {
         let c = riff_chunk(b"INAM", b"abc");
         assert_eq!(c.len(), 4 + 4 + 4); // id + size + 3 字节 + 1 补位
         assert_eq!(u32::from_le_bytes([c[4], c[5], c[6], c[7]]), 3);
+    }
+
+    #[test]
+    fn container_noise_is_filtered() {
+        assert!(is_container_noise("handler_name=SoundHandler"));
+        assert!(is_container_noise("major_brand=M4A "));
+        assert!(is_container_noise("language=und"));
+        assert!(!is_container_noise("TITLE=Song"));
+        assert!(!is_container_noise("artist=Some Artist"));
+        // 过滤后 m4a 的垃圾不会进输出
+        let vc = build_vorbis(
+            "t",
+            &["handler_name=S".to_string(), "title=T".to_string(), "language=und".to_string()],
+        );
+        let tags = tags_from_blocks(&[(T_VORBIS_COMMENT, vc)]);
+        assert_eq!(tags, vec!["title=T".to_string()]);
     }
 }
