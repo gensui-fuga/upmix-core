@@ -68,9 +68,9 @@ pub struct Cli {
     // ---- fast-mode tuning ----
     #[arg(long, default_value_t = 4096)]
     pub win_size: usize,
-    #[arg(long, default_value_t = -6.0)]
+    #[arg(long, default_value_t = -3.0)]
     pub lfe_gain_db: f64,
-    #[arg(long, default_value_t = 120.0)]
+    #[arg(long, default_value_t = 150.0)]
     pub lfe_high_hz: f64,
     #[arg(long, default_value_t = -3.0)]
     pub surround_gain_db: f64,

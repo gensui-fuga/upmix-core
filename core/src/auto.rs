@@ -51,8 +51,8 @@ impl Default for StemRouting {
             bass_lr: 1.0,
             other_lr: 0.85,
             other_surround: 0.60,
-            lfe_gain_db: -4.0,
-            lfe_hz: 120.0,
+            lfe_gain_db: -3.0,
+            lfe_hz: 150.0,
         }
     }
 }
@@ -146,7 +146,8 @@ pub fn route(stems: &Stems, cfg: &StemRouting) -> Result<AudioBuffer> {
         out.data[crate::upmix::CH_BR][i] += cfg.other_surround * -o_side;
 
         // LFE source: bass + drums (+ a little other)
-        lfe_mid[i] = 0.6 * mid(&stems.bass, i) + 0.7 * mid(&stems.drums, i) + 0.2 * mid(&stems.other, i);
+        lfe_mid[i] =
+            0.6 * mid(&stems.bass, i) + 0.7 * mid(&stems.drums, i) + 0.2 * mid(&stems.other, i);
     }
 
     // Low-pass the LFE bus (4th-order Linkwitz-Riley) and trim.
@@ -196,6 +197,37 @@ mod tests {
         let c: f64 = out.data[crate::upmix::CH_FC].iter().map(|x| x * x).sum();
         let fl: f64 = out.data[crate::upmix::CH_FL].iter().map(|x| x * x).sum();
         assert!(c > fl * 4.0, "center {c} should dominate front-left {fl}");
+    }
+
+    /// 回归测试：LFE 不能只是"非零"，得真的到得了听得见的电平。
+    ///
+    /// 原来这里只断言 lfe > 0.0，于是默认把 LFE 压到 -6dB、120Hz 也照样过——
+    /// 用户反馈"低音没声音"时测试是绿的。改成要求 60Hz 的鼓在 LFE 里
+    /// 至少达到主声道的 40%（约 -8dB），这是"低音炮能听出来"的下限。
+    #[test]
+    fn lfe_is_audible_not_merely_nonzero() {
+        let sr = 48000;
+        let n = 48000;
+        let stems = Stems {
+            sample_rate: sr,
+            bits_per_sample: 16,
+            vocals: AudioBuffer::new(sr, 16, 2, n),
+            drums: stem(sr, n, 60.0),
+            bass: AudioBuffer::new(sr, 16, 2, n),
+            other: AudioBuffer::new(sr, 16, 2, n),
+        };
+        let out = route(&stems, &StemRouting::default()).unwrap();
+        let norm = |ch: usize| -> f64 { out.data[ch].iter().map(|x| x * x).sum::<f64>().sqrt() };
+        let lfe = norm(crate::upmix::CH_LFE);
+        let front = norm(crate::upmix::CH_FL);
+        assert!(front > 0.0, "左前应该有鼓声");
+        let ratio = lfe / front;
+        assert!(
+            ratio > 0.4,
+            "LFE 相对主声道只有 {:.3}（{:.1} dB），低音炮会听不见",
+            ratio,
+            20.0 * ratio.log10()
+        );
     }
 
     #[test]
