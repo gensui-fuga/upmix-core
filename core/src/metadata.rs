@@ -239,17 +239,11 @@ pub fn inject_into_flac(path: &Path, source: Option<&Path>, extra_tags: &[String
 // =====================================================================
 
 /// 找一个 ffmpeg：优先程序自己旁边的（发行包随机附带），再 PATH。
+///
+/// 这里曾经是 `fileio::ffmpeg_path()` 的一份复制粘贴。同一件事有两份实现，
+/// 迟早会分叉（这次修 bug 的教训）——所以直接复用。
 pub fn ffmpeg_bin() -> PathBuf {
-    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join(name);
-            if p.exists() {
-                return p;
-            }
-        }
-    }
-    PathBuf::from(name)
+    crate::fileio::ffmpeg_path()
 }
 
 fn unique_temp(tag: &str, ext: &str) -> PathBuf {
