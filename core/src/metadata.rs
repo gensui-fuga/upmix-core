@@ -361,6 +361,41 @@ fn riff_info_key(tag: &str) -> Option<[u8; 4]> {
     Some(*v)
 }
 
+/// 是不是歌词/作词作曲类（RIFF INFO 没有对应键，只能走 ID3 的那批）。
+fn is_lyric_key(base: &str) -> bool {
+    matches!(
+        base,
+        "LYRICS"
+            | "UNSYNCEDLYRICS"
+            | "UNSYNCED_LYRICS"
+            | "UNSYNCED LYRICS"
+            | "SYNCEDLYRICS"
+            | "SYNCED_LYRICS"
+            | "COMPOSER"
+            | "LYRICIST"
+    )
+}
+
+/// 取标签键的"基名"，剥掉 ffmpeg 加的语言后缀。
+///
+/// ffmpeg 从 ID3 的 USLT 帧读歌词时会给键名加语言后缀，读出来是 `lyrics-eng`。
+/// 早先这里只匹配裸 `LYRICS`，于是**真实的 MP3/WAV 歌词在 WAV 输出时被丢掉**
+/// ——那些文件的歌词就是 USLT，读出来必然带后缀。
+///
+/// 只剥 2~3 个字母的语言码，且基名必须是已知歌词类键，避免把 `ENCODED-BY`
+/// 这类正常键误伤成 `ENCODED`。
+fn tag_basename(key: &str) -> String {
+    let k = key.trim().to_ascii_uppercase();
+    if let Some((head, tail)) = k.rsplit_once('-') {
+        let looks_like_lang =
+            (2..=3).contains(&tail.len()) && tail.chars().all(|c| c.is_ascii_alphabetic());
+        if looks_like_lang && is_lyric_key(head) {
+            return head.to_string();
+        }
+    }
+    k
+}
+
 /// 需要塞进 WAV 的 `id3 ` 块的标签（RIFF INFO 表达不了的）。
 fn id3_only_tags(comments: &[String]) -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -368,19 +403,11 @@ fn id3_only_tags(comments: &[String]) -> Vec<(String, String)> {
         let Some((k, v)) = c.split_once('=') else {
             continue;
         };
-        let ku = k.trim().to_ascii_uppercase();
         // 歌词/作词作曲这类 RIFF INFO 没有对应键的，全过继给 ID3。
-        let keep = matches!(
-            ku.as_str(),
-            "LYRICS"
-                | "UNSYNCEDLYRICS"
-                | "UNSYNCED_LYRICS"
-                | "SYNCEDLYRICS"
-                | "COMPOSER"
-                | "LYRICIST"
-        );
-        if keep {
-            out.push((ku, v.to_string()));
+        // 键名先归一化，否则 `lyrics-eng` 这种带语言后缀的会被漏掉。
+        let base = tag_basename(k);
+        if is_lyric_key(&base) {
+            out.push((base, v.to_string()));
         }
     }
     out
@@ -654,6 +681,55 @@ mod tests {
         assert!(id3.starts_with(b"ID3"));
         assert!(id3.windows(4).any(|w| w == b"USLT"));
         assert!(id3.windows(5).any(|w| w == b"hello"));
+    }
+
+    /// 回归测试：ffmpeg 从 ID3 的 USLT 帧读歌词时键名带语言后缀（`lyrics-eng`）。
+    ///
+    /// 上面那个测试用的是裸 `LYRICS`，所以**发现不了**这个 bug——真实 MP3/WAV
+    /// 的歌词都读出 `lyrics-eng`，结果 WAV 输出一个 `id3 ` 块都不写，歌词静默丢失。
+    #[test]
+    fn id3_block_accepts_language_suffixed_lyrics() {
+        let blocks: Vec<Block> = vec![(
+            T_VORBIS_COMMENT,
+            build_vorbis(
+                "t",
+                &[
+                    "TITLE=S".to_string(),
+                    "lyrics-eng=hello".to_string(),
+                    "UNSYNCEDLYRICS-zho=中文词".to_string(),
+                    "COMPOSER-eng=某人".to_string(),
+                ],
+            ),
+        )];
+        let pairs = id3_only_tags(&tags_from_blocks(&blocks));
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"LYRICS"), "lyrics-eng 没被认出来：{keys:?}");
+        assert!(
+            keys.contains(&"UNSYNCEDLYRICS"),
+            "UNSYNCEDLYRICS-zho 没被认出来：{keys:?}"
+        );
+        assert!(
+            keys.contains(&"COMPOSER"),
+            "COMPOSER-eng 没被认出来：{keys:?}"
+        );
+        let id3 = build_id3v23(&pairs);
+        assert!(id3.windows(4).any(|w| w == b"USLT"));
+        assert!(id3.windows(5).any(|w| w == b"hello"));
+        assert!(id3.windows(4).any(|w| w == b"TCOM"));
+    }
+
+    #[test]
+    fn tag_basename_keeps_non_lyric_keys_intact() {
+        assert_eq!(tag_basename("lyrics-eng"), "LYRICS");
+        assert_eq!(tag_basename("LYRICS"), "LYRICS");
+        assert_eq!(tag_basename("Lyrics-ENG"), "LYRICS");
+        // 这些不是歌词类，后缀不能被剥掉——否则 ENCODED-BY 会变成 ENCODED。
+        assert_eq!(tag_basename("ENCODED-BY"), "ENCODED-BY");
+        assert_eq!(tag_basename("encoded-by"), "ENCODED-BY");
+        assert_eq!(tag_basename("TITLE"), "TITLE");
+        // 后缀不是语言码（太长/含数字）也不剥。
+        assert_eq!(tag_basename("LYRICS-ENGLISH"), "LYRICS-ENGLISH");
+        assert_eq!(tag_basename("LYRICS-1"), "LYRICS-1");
     }
 
     #[test]
