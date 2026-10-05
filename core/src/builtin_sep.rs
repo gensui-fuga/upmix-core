@@ -38,6 +38,12 @@ fn run_once(
 /// ——反复建/毁 ORT 会话把内存吃穿，分配失败直接 abort，窗口瞬间没了。
 /// 顺带这里也是批量慢的元凶：本来每个文件都在白读一遍 200MB 模型。
 fn load_engine(handle: &ModelHandle) -> Result<(), String> {
+    // CI 靠数这一行来验"引擎到底加载了几次"：旧代码每个文件都会走到这里
+    // （2 个文件 = 2 行），修好后一次批量只有 1 行。设了环境变量才打印，
+    // 正常使用没有任何输出。
+    if std::env::var_os("UPMIX_TRACE_ENGINE").is_some() {
+        eprintln!("upmix-engine-load");
+    }
     // 后端选择必须在 preload 之前落地：ORT 的 EP 是在建会话时定的。
     match crate::backend::apply_pending() {
         Ok(b) => {
