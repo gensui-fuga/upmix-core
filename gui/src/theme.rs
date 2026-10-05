@@ -100,62 +100,84 @@ pub fn ink_night() -> Theme {
 }
 
 /// 千禧：银色铬金属底 + 半透明白玻璃卡片 + 强镜面反光。
+///
+/// 旧版 accent / ok / danger **全是灰色**：accent 对卡片只有 2.44:1、ok 只有
+/// 2.73:1，两条都低于 3:1。后果不是"不好看"，是**功能性的**——「成功」和
+/// 「失败」在界面上根本分不出来，强调色也等于不存在。现在换成 Y2K 的水蓝
+/// 强调 + 真正的绿/红语义色，全部 ≥4.5:1。
 pub fn millennium() -> Theme {
     Theme {
         id: "millennium",
         name: "千禧",
         dark: false,
         style: Style::Metal,
-        paper: Color32::from_rgb(0xC8, 0xC8, 0xCC),
-        paper2: Color32::from_rgb(0xF0, 0xF0, 0xF2),
-        card: Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 150),
+        paper: Color32::from_rgb(0xC9, 0xCB, 0xD1),
+        paper2: Color32::from_rgb(0xF0, 0xF1, 0xF4),
+        card: Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 205),
         stroke: Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 242),
-        ink: Color32::from_rgb(0x2E, 0x2E, 0x32),
-        ink2: Color32::from_rgb(0x56, 0x56, 0x5C),
-        ink3: Color32::from_rgb(0x84, 0x84, 0x8A),
-        accent: Color32::from_rgb(0x8E, 0x96, 0xA2),
-        ok: Color32::from_rgb(0x8C, 0x8C, 0x92),
-        danger: Color32::from_rgb(0x5E, 0x5E, 0x64),
+        ink: Color32::from_rgb(0x1F, 0x21, 0x28),
+        ink2: Color32::from_rgb(0x4A, 0x4D, 0x57),
+        ink3: Color32::from_rgb(0x68, 0x6C, 0x78),
+        accent: Color32::from_rgb(0x0F, 0x6E, 0x96),
+        ok: Color32::from_rgb(0x2A, 0x7A, 0x4C),
+        danger: Color32::from_rgb(0xA8, 0x1E, 0x12),
     }
 }
 
-/// 霓虹：纯黑底 + 品红/紫光幕浮在上面 + 扫描线。
+/// 霓虹：午夜蓝炭灰底 + 品红强调 + 青色细边，发光只留给标题和主按钮。
+///
+/// 旧版踩了霓虹设计里最典型的两条坑：
+/// 1. 底色是**高饱和深紫**（`card` 甚至是 63% 不透明的饱和紫）。霓虹色在饱和
+///    底色上会互相洇染，粉字压在紫底上就糊成一团。指南的原话是"底色要深色、
+///    中性，让霓虹在没有竞争的情况下发光"。
+/// 2. `neon_curtain` 给**每一张卡片**都加光幕 + 扫描线 + 发光描边 + 外发光，
+///    整屏扫描线再加一层。指南明说"過多的霓虹燈會消弭光影之間戲劇性的相互
+///    作用"——霓虹是强调点，不是主导元素。
+/// 现在底色换成去饱和的午夜蓝炭灰（不用纯黑，缓和 halation），卡片给实底当
+/// 文字遮罩，正文用离白压到 14.8:1，饱和色只出现在标题/强调/主按钮上。
 pub fn neon() -> Theme {
     Theme {
         id: "neon",
         name: "霓虹",
         dark: true,
         style: Style::Neon,
-        paper: Color32::from_rgb(0x03, 0x02, 0x08),
-        paper2: Color32::from_rgb(0x0A, 0x03, 0x1A),
-        card: Color32::from_rgba_unmultiplied(0x6C, 0x1E, 0xA6, 162),
-        stroke: Color32::from_rgba_unmultiplied(0xFF, 0x3C, 0xAA, 185),
-        ink: Color32::from_rgb(0xF4, 0xEA, 0xFF),
-        ink2: Color32::from_rgb(0xC0, 0xAE, 0xE0),
-        ink3: Color32::from_rgb(0x8E, 0x7C, 0xB4),
-        accent: Color32::from_rgb(0xFF, 0x2E, 0x9A),
-        ok: Color32::from_rgb(0x53, 0xFF, 0xB0),
-        danger: Color32::from_rgb(0xFF, 0x5C, 0x7A),
+        paper: Color32::from_rgb(0x0E, 0x11, 0x17),
+        paper2: Color32::from_rgb(0x12, 0x16, 0x1E),
+        card: Color32::from_rgb(0x19, 0x1D, 0x26),
+        // 经典霓虹对：品红强调 + 青色细边。边只做 3:1 的描边，不承载正文。
+        stroke: Color32::from_rgba_unmultiplied(0x3D, 0xE1, 0xFF, 96),
+        ink: Color32::from_rgb(0xED, 0xEF, 0xF5),
+        ink2: Color32::from_rgb(0xB7, 0xBE, 0xCC),
+        ink3: Color32::from_rgb(0x8E, 0x96, 0xA6),
+        accent: Color32::from_rgb(0xFF, 0x3D, 0x9E),
+        ok: Color32::from_rgb(0x4A, 0xDE, 0x9B),
+        danger: Color32::from_rgb(0xFF, 0x5C, 0x6E),
     }
 }
 
-/// 梦核：粉彩柔光、朦胧、低对比的梦幻质感。
+/// 梦核：浅色柔和、朦胧，蓝/绿/粉/白都在。
+///
+/// 梦核（dreamcore）的核心色按美学 wiki 是"彩虹色、蓝色、绿色、粉色、白色"，
+/// 配色浅而柔和——旧版整屏只有一个紫调，色相上就已经不像梦核了。更要命的是
+/// 文字对比度：ink3 只有 2.58:1、accent 2.42:1、ok 2.08:1，而 ok↔danger 的
+/// 可区分度只有 1.18——「成功」和「失败」在界面上几乎同色。现在保留粉/蓝/
+/// 薄荷/奶油的柔光，但文字压到 11.5 / 7.0 / 4.9，语义色换成真正的绿和红。
 pub fn dreamcore() -> Theme {
     Theme {
         id: "dream",
         name: "梦核",
         dark: false,
         style: Style::Dream,
-        paper: Color32::from_rgb(0xEE, 0xE3, 0xF5),
-        paper2: Color32::from_rgb(0xE0, 0xEF, 0xEE),
-        card: Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 146),
-        stroke: Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 205),
-        ink: Color32::from_rgb(0x57, 0x4E, 0x6B),
-        ink2: Color32::from_rgb(0x7C, 0x73, 0x91),
-        ink3: Color32::from_rgb(0x9E, 0x96, 0xB0),
-        accent: Color32::from_rgb(0xB0, 0x92, 0xD6),
-        ok: Color32::from_rgb(0x7C, 0xB8, 0xA0),
-        danger: Color32::from_rgb(0xD1, 0x8A, 0x9A),
+        paper: Color32::from_rgb(0xEF, 0xE7, 0xF6),
+        paper2: Color32::from_rgb(0xE2, 0xF0, 0xEE),
+        card: Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 205),
+        stroke: Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 220),
+        ink: Color32::from_rgb(0x3B, 0x32, 0x50),
+        ink2: Color32::from_rgb(0x5A, 0x52, 0x70),
+        ink3: Color32::from_rgb(0x72, 0x6A, 0x88),
+        accent: Color32::from_rgb(0x73, 0x46, 0xB8),
+        ok: Color32::from_rgb(0x2C, 0x78, 0x60),
+        danger: Color32::from_rgb(0x9E, 0x2F, 0x4C),
     }
 }
 
@@ -309,8 +331,14 @@ pub fn card(t: &Theme) -> Card {
 
 fn card_frame(t: &Theme) -> Frame {
     if t.style == Style::Neon {
-        // 霓虹：不要卡片，内容直接浮在黑底上。
-        return Frame::new().inner_margin(Margin::symmetric(4, 12));
+        // 霓虹：给一层实底面板当文字遮罩。旧版这里是空 Frame（内容直接浮在
+        // 背景上），再叠每卡片的发光光幕，正文对比度随光幕起伏——霓虹指南
+        // 明确要求纹理上的文字背后压一层实底或遮罩。
+        return Frame::new()
+            .fill(t.card)
+            .corner_radius(CornerRadius::same(16))
+            .stroke(Stroke::new(1.0, t.stroke))
+            .inner_margin(Margin::symmetric(16, 14));
     }
     let shadow = if t.layered() {
         Shadow {
@@ -393,9 +421,11 @@ pub fn paint_backdrop(ui: &egui::Ui, t: &Theme) {
             chrome_bands(painter, rect);
         }
         Style::Neon => {
-            // 霓虹：纯黑底 + 横扫线，发光全部交给分区光幕。
-            painter.rect_filled(rect, 0.0, Color32::from_rgb(0x01, 0x00, 0x04));
-            scanlines(painter, rect, 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 86));
+            // 霓虹：底色走上方的午夜蓝渐变。旧版这里硬盖一层 #010004 纯黑，
+            // 等于把 paper/paper2 作废，而纯黑会加重 halation（发光字在暗底上
+            // 的晕染）。扫描线也压到很淡：指南提醒纹理上的文字对比度不稳定，
+            // 这里只留一点点 CRT 味。
+            scanlines(painter, rect, 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 26));
         }
         Style::Dream => {
             // 梦核：粉 / 蓝 / 薄荷 / 奶油的大片柔光，低对比不刺眼。
@@ -411,70 +441,42 @@ pub fn paint_backdrop(ui: &egui::Ui, t: &Theme) {
     }
 }
 
-/// 计算圆角矩形在某一高度处的可见 x 范围（用于逐行绘制时保持圆角）。
-fn rounded_row(rect: egui::Rect, r: f32, y: f32) -> (f32, f32) {
-    let r = r.min(rect.width() * 0.5).min(rect.height() * 0.5).max(0.0);
-    if r <= 0.0 {
-        return (rect.left(), rect.right());
-    }
-    let dy = if y < rect.top() + r {
-        (rect.top() + r) - y
-    } else if y > rect.bottom() - r {
-        y - (rect.bottom() - r)
-    } else {
-        0.0
-    };
-    if dy <= 0.0 {
-        return (rect.left(), rect.right());
-    }
-    let dx = (r * r - dy * dy).max(0.0).sqrt();
-    let inset = r - dx;
-    (rect.left() + inset, rect.right() - inset)
-}
-
-/// 霓虹光幕：没有边框的发光面板，上亮下淡、像悬浮的屏幕。
+/// 霓虹面板：顶边一条灯管 + 往下淡出的很淡光晕。
+///
+/// 旧版给**每一张卡片**都铺满光幕 + 内部扫描线 + 发光描边 + 外发光，整屏还
+/// 再叠一层扫描线。霓虹美学指南的原话是"過多的霓虹燈會消弭光影之間戲劇性的
+/// 相互作用"——发光是强调手段，用满了就没有强调可言，正文也跟着难读。现在
+/// 只保留顶边这一条灯管，其余交给卡片的实底和青色细边。
 fn neon_curtain(painter: &egui::Painter, rect: egui::Rect, tint: Color32) {
     let p = painter.with_clip_rect(rect);
-    let corner = 20.0f32;
-    let steps = 64;
-    let h = rect.height();
+
+    // 顶边灯管：整张卡片唯一的发光元素
+    p.hline(
+        rect.left()..=rect.right(),
+        rect.top() + 0.5,
+        Stroke::new(1.5, Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 170)),
+    );
+
+    // 从顶边往下淡出的光晕，只占卡片上部最多 48px
+    let h = rect.height().min(48.0);
+    if h <= 0.0 {
+        return;
+    }
+    let steps = 24;
     for i in 0..steps {
         let f = (i as f32 + 0.5) / steps as f32;
-        let peak = (1.0 - (f - 0.30).abs() * 1.65).max(0.0);
-        let a = (peak * peak * 132.0) as u8;
+        let a = ((1.0 - f) * (1.0 - f) * 46.0) as u8;
         if a == 0 {
             continue;
         }
         let y0 = rect.top() + h * (i as f32 / steps as f32);
         let y1 = rect.top() + h * ((i as f32 + 1.0) / steps as f32);
-        let (x0, x1) = rounded_row(rect, corner, (y0 + y1) * 0.5);
         p.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)),
+            egui::Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(rect.right(), y1)),
             0.0,
             Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), a),
         );
     }
-    // 内部扫描线（压暗条纹，CRT 味）
-    let mut y = rect.top();
-    while y < rect.bottom() {
-        let (x0, x1) = rounded_row(rect, corner, y);
-        p.hline(x0..=x1, y, Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 78)));
-        y += 4.0;
-    }
-    // 圆角发光边
-    let cr = egui::CornerRadius::same(corner as u8);
-    p.rect_stroke(
-        rect.shrink(0.8),
-        cr,
-        Stroke::new(1.4, Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 215)),
-        egui::StrokeKind::Inside,
-    );
-    glow(
-        &p,
-        egui::pos2(rect.center().x, rect.top()),
-        rect.width() * 0.7,
-        Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 96),
-    );
 }
 
 /// 横向扫描线：cybercore / CRT 的味道。

@@ -1,7 +1,7 @@
 name: build
 
 # 云端构建，不在本地占 CPU。
-# - push 到 master：只跑构建，产物在 Actions 的 Artifacts 里
+# - push 到 master / legacy-cpu：只跑构建，产物在 Actions 的 Artifacts 里
 # - 打 tag（v*）：构建完自动发 Release 附二进制
 # - 也可以手动触发
 
@@ -144,7 +144,22 @@ jobs:
           ORT_LIB_LOCATION: ${{ github.workspace }}/ort-dist/lib
           ORT_PREFER_DYNAMIC_LINK: "1"
           ORT_SKIP_DOWNLOAD: "1"
-        run: cargo build --release
+        # --locked：仓库里的 Cargo.lock 必须和 Cargo.toml 一致，否则直接失败。
+        # 以前不加，cargo 会在 CI 里悄悄重算一遍依赖，结果提交上去的锁文件
+        # 长期是残缺的（缺 ort/stem-splitter 整棵树）也没人发现。
+        run: cargo build --release --locked
+
+      - name: 把 baseline libonnxruntime.so 摆到二进制旁边
+        # 这个包是**动态**链接 ORT 的（-rpath $ORIGIN），二进制旁边必须有 .so 才
+        # 跑得起来。必须排在所有「执行二进制」的步骤之前——单元测试的测试二进制
+        # 同样链接了 ort，早于这一步跑会直接找不到库。
+        run: |
+          set -eux
+          for f in ort-dist/lib/libonnxruntime.so*; do
+            [ -e "$f" ] && cp -P "$f" target/release/ || true
+          done
+          ls -la target/release/libonnxruntime.so*
+          ldd target/release/upmix-gui | grep -i onnxruntime || echo "(未直接出现在 ldd，链接时已指定 search 目录)"
 
       - name: 跑单元测试（元数据搬运/RIFF/ID3 这类纯逻辑，不需要模型）
         # 以前 CI 只 build 不 test，改坏了没人拦得住。这里补上。
@@ -154,7 +169,22 @@ jobs:
           ORT_LIB_LOCATION: ${{ github.workspace }}/ort-dist/lib
           ORT_PREFER_DYNAMIC_LINK: "1"
           ORT_SKIP_DOWNLOAD: "1"
-        run: cargo test --release -p upmix-core
+        run: cargo test --release --locked -p upmix-core
+
+      - name: clippy（只报告不拦，用来找潜在 bug）
+        # 人为 review 会漏，让编译器帮忙扫一遍。continue-on-error：样式类告警
+        # 不该拦住发版，但正确性类的必须能在日志里看见。
+        continue-on-error: true
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v2 -C link-arg=-Wl,-rpath,$ORIGIN"
+          ORT_LIB_LOCATION: ${{ github.workspace }}/ort-dist/lib
+          ORT_PREFER_DYNAMIC_LINK: "1"
+          ORT_SKIP_DOWNLOAD: "1"
+        run: |
+          cargo clippy --release --locked -p upmix-core --all-targets -- -W clippy::all 2>&1 | tail -300
+          echo "=== 只看正确性/可疑类 ==="
+          cargo clippy --release --locked -p upmix-core --all-targets -- -W clippy::all 2>&1 \
+            | grep -E "^warning|^error" | sort | uniq -c | sort -rn | head -40
 
       - name: 检查二进制里的 AVX2/AVX512 指令（仅供参考）
         run: |
@@ -171,18 +201,6 @@ jobs:
           if [ "$Z" -gt 0 ]; then
             echo "::warning::产物里含 AVX-512 指令（$Z 行），需确认不是无条件路径"
           fi
-
-      - name: 确认动态依赖能找到 libonnxruntime
-        run: |
-          set -eux
-          LDD=$(ldd target/release/upmix-gui 2>&1 || true)
-          echo "$LDD" | grep -i onnxruntime || echo "(未直接出现在 ldd，链接时已指定 search 目录)"
-          # 把 .so 放到二进制旁边，配合 -rpath $ORIGIN 保证运行时能找到
-          SO=$(find ort-dist/lib -name 'libonnxruntime.so.*' | head -1)
-          for f in ort-dist/lib/libonnxruntime.so*; do
-            [ -e "$f" ] && cp -P "$f" target/release/ 2>/dev/null || true
-          done
-          ls -la target/release/libonnxruntime.so* 2>/dev/null || true
 
       - name: 取静态 ffmpeg（随包分发，用户不用自己装）
         run: |
@@ -201,6 +219,12 @@ jobs:
           cp "$FF" dist-ffmpeg
           chmod +x dist-ffmpeg
           ./dist-ffmpeg -version | head -1
+          # ffprobe 不进发行包，只给端到端测试验输出用（声道数/采样率/标签/封面）。
+          FFP=$(find . -maxdepth 3 -type f -name ffprobe | head -1)
+          test -n "$FFP"
+          cp "$FFP" dist-ffprobe
+          chmod +x dist-ffprobe
+          ./dist-ffprobe -version | head -1
 
       - name: 预取模型（打进包，用户首次运行就不用联网）
         run: |
@@ -231,6 +255,41 @@ jobs:
           test -f smoke/out/a_5.1.flac
           test -f smoke/out/b_5.1.flac
 
+      - name: 把 ffmpeg 摆到二进制旁边（复刻发行包布局）
+        # core 的 ffmpeg_path() 是「先找 current_exe 旁边的，找不到再回落 PATH」。
+        # 发行包里 ffmpeg 就躺在二进制旁边；CI 里如果只在仓库根目录放一份，
+        # 测的就不是用户实际拿到的那个布局——MP3 解码和 WAV 标签搬运都依赖
+        # 这个查找结果，布局不对会测出一堆假失败。
+        run: |
+          set -eux
+          cp dist-ffmpeg target/release/ffmpeg
+          cp dist-ffprobe target/release/ffprobe
+          chmod +x target/release/ffmpeg target/release/ffprobe
+          test -x target/release/ffmpeg
+
+      - name: 备好内置分离模型（auto 模式端到端要用）
+        # 从源码编译出来的二进制旁边没有 models/，auto 模式的端到端会直接报
+        # 「找不到 models/ 目录」。注意模型和 ffmpeg 一样是按「二进制旁边优先」
+        # 找的（builtin_sep 里先看 current_exe().parent()，再回落 CWD），而
+        # ci/e2e.sh 会 cd 到临时目录，所以必须放到 target/release/ 下 ——
+        # 这也正好是发行包里的真实布局。
+        run: |
+          set -eux
+          ./target/release/upmix-core --prepare-model --outdir target/release/models
+          test -d target/release/models
+
+      - name: 端到端功能测试（真二进制 + 真音频）
+        # 单元测试只覆盖纯逻辑，而用户踩到的坑全在「真二进制 + 真文件」这条路上：
+        # 封面歌手歌词丢失、低音没声音、批量闪退。见 ci/e2e.sh 的注释。
+        env:
+          BIN: target/release/upmix-core
+          FFMPEG: ./dist-ffmpeg
+          FFPROBE: ./dist-ffprobe
+        run: |
+          set -eux
+          chmod +x ci/e2e.sh
+          bash ci/e2e.sh
+
       - uses: actions/upload-artifact@v4
         with:
           name: upmix-linux
@@ -255,7 +314,9 @@ jobs:
       - name: 构建
         env:
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
-        run: cargo build --release
+        # 和 linux 侧一样用 --locked：Windows 也得按锁文件里的版本编，
+        # 否则同一个 tag 在两个平台上解析出的依赖可能不是同一套。
+        run: cargo build --release --locked
 
       - name: 取静态 ffmpeg（随包分发）
         shell: pwsh
@@ -274,6 +335,115 @@ jobs:
           path: |
             target/release/*.exe
             ffmpeg.exe
+
+  wine-auto-batch:
+    # 朋友实测：Windows + 自动分离，单个文件能转、批量跑到第二个文件整窗消失。
+    # 这里用 Wine 跑**真正的 Windows 产物**，把批量自动分离整条路走一遍，数引擎
+    # 实际加载了几次：旧行为 = 每个文件一次，修好后 = 1 次。
+    # 注意：Wine 不是 Windows。它能证明这条路在 Windows 二进制上跑得通、引擎只
+    # 加载一次；不能替代朋友在真机上复测。
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: upmix-windows
+          path: win
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: upmix-linux
+          path: lin
+
+      - name: 装 Wine
+        run: |
+          set -eux
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          # 只装 wine64 会得到 /usr/lib/wine/wine64，没有 /usr/bin/wine；
+          # 而缺了 wine32 的话 prefix 初始化会失败（syswow64\rundll32.exe 打不开）。
+          sudo apt-get install -y --no-install-recommends xvfb wine
+          sudo apt-get install -y --no-install-recommends wine32 || true
+          wine --version
+          # prefix 必须在 X 下建：裸跑 wineboot 会报
+          # "Make sure that your X server is running and that $DISPLAY is set correctly"
+          xvfb-run -a wineboot -u || true
+          xvfb-run -a wine cmd /c echo wine-self-test-ok || true
+
+      - name: 造 directml.dll 桩（只为让 Wine 能加载 exe）
+        # objdump -p 实测：upmix-core.exe 的**静态**导入表里有
+        #   directml.dll!DMLCreateDevice1（就这一个符号）
+        #   d3d12.dll!D3D12CreateDevice / D3D12SerializeVersionedRootSignature
+        #   dxgi.dll!CreateDXGIFactory2
+        # 而且这个 PE 根本没有延迟导入段，所以 Windows 加载器在进程启动时就要
+        # 解析它们。Wine 自带 d3d12/dxgi，但没有 DirectML.dll，于是 exe 连启动
+        # 都做不到（实测退出码 53，无任何输出）。
+        # 我们关掉了 directml feature（Cargo.toml 里 default-features = false），
+        # 从来不激活 DirectML EP，所以这个桩不会被真正调用——它只是让加载器
+        # 过这一关。**桩不进发行包，只在这个测试里用。**
+        run: |
+          set -eux
+          sudo apt-get install -y --no-install-recommends mingw-w64
+          cat > stub.c <<'EOF'
+          #include <windows.h>
+          HRESULT WINAPI DMLCreateDevice1(void *a, DWORD b, DWORD c, void *d, void *e) {
+              (void)a; (void)b; (void)c; (void)d; (void)e;
+              return (HRESULT)0x80004005L;
+          }
+          EOF
+          x86_64-w64-mingw32-gcc -shared -O2 -o directml.dll stub.c
+          objdump -p directml.dll > dml.txt
+          grep -i DMLCreateDevice1 dml.txt || { echo "桩没导出 DMLCreateDevice1"; tail -40 dml.txt; exit 1; }
+
+      - name: Wine 下跑自动分离批量（2 个文件）
+        env:
+          UPMIX_TRACE_ENGINE: "1"
+          WINEDEBUG: "-all"
+        run: |
+          # 注意：GitHub Actions 用 `bash -e` 跑这段，`set -ux` 关不掉那个 -e。
+          # 上一轮就是探针退出 53 直接把步骤带走了，后面的诊断一句没跑。
+          # 所以探针阶段显式 `set +e`。
+          set -ux
+          WINE=$(command -v wine || command -v wine64 || echo /usr/lib/wine/wine64)
+          D="$PWD/t"
+          mkdir -p "$D/in" "$D/out"
+          # exe 全放同一层：models/ 和 ffmpeg.exe 必须挨着 exe
+          # （见 core/src/lib.rs 的 ffmpeg_path 和 builtin_sep.rs 的 model_dir）
+          find win -type f -name '*.exe' -exec cp {} "$D/" \;
+          cp -r "$(find lin -type d -name models | head -1)" "$D/models"
+          # exe 的静态导入表要 directml.dll，Wine 没有，放桩在 exe 同目录
+          cp directml.dll "$D/"
+          # 造两个 4 秒立体声 WAV：用 Linux 侧静态 ffmpeg，不受 Wine 影响
+          LFF=$(find lin -type f -name dist-ffmpeg | head -1)
+          chmod +x "$LFF"
+          "$LFF" -hide_banner -loglevel error -y \
+            -f lavfi -i "sine=frequency=440:duration=4" -ac 2 -ar 44100 "$D/in/a.wav"
+          "$LFF" -hide_banner -loglevel error -y \
+            -f lavfi -i "sine=frequency=330:duration=4" -ac 2 -ar 44100 "$D/in/b.wav"
+          cd "$D"
+
+          set +e
+          echo "=== exe 的 DLL 依赖（objdump 直接读 PE，不靠运行）==="
+          objdump -p upmix-core.exe 2>/dev/null | grep -i "DLL Name" || true
+          echo "=== 探针1：Wine 自身能不能跑 Windows 程序 ==="
+          xvfb-run -a "$WINE" cmd /c echo wine-self-test-ok > p1.txt 2>&1
+          echo "p1 exit=$?"
+          tail -20 p1.txt
+          echo "=== 探针2：upmix-core.exe 能不能起来（不静音 Wine 的报错）==="
+          WINEDEBUG=err+all xvfb-run -a "$WINE" upmix-core.exe --help > p2.txt 2>&1
+          P2=$?
+          echo "p2 exit=$P2"
+          tail -40 p2.txt
+          echo "=== 正式跑批量 ==="
+          xvfb-run -a "$WINE" upmix-core.exe --batch in --mode auto --outdir out > log.txt 2>&1
+          R=$?
+          echo "batch exit=$R"
+          tail -60 log.txt
+          N=$(grep -c '^upmix-engine-load$' log.txt || true)
+          echo "Wine 下引擎实际加载次数 = $N（期望 1）"
+          ls -la out 2>/dev/null || true
+          test "$R" -eq 0
+          test "$N" -eq 1
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

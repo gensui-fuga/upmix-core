@@ -2,12 +2,14 @@
 
 use eframe::egui;
 use egui::RichText;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
 
 use upmix_core::{UpmixConfig, Upmixer};
 
+use crate::picker::{PickAction, PickOutcome, PickTarget, Picker};
 use crate::theme::{self, Theme};
 
 #[derive(PartialEq, Clone, Copy)]
@@ -48,7 +50,6 @@ pub struct App {
     win_size: usize,
 
     // auto params
-    demucs_model: String,
     keep_stems: bool,
 
     // input
@@ -77,6 +78,8 @@ pub struct App {
     card_alpha: f32,
     /// 上次已写入配置的组合，避免每帧落盘。
     last_saved: Option<(String, [u8; 4], u8)>,
+    /// 应用内文件 / 目录选择器。`Some` 时弹窗（不调外部文件管理器）。
+    picker: Option<crate::picker::Picker>,
 
     status: String,
     status_ok: Option<bool>,
@@ -113,7 +116,6 @@ impl App {
             surround_delay_ms: 12.0,
             vocal_boost_db: 2.0,
             win_size: 4096,
-            demucs_model: "htdemucs".into(),
             keep_stems: false,
             indir,
             outdir: String::new(),
@@ -126,6 +128,7 @@ impl App {
             wallpaper_msg: None,
             card_alpha,
             last_saved: None,
+            picker: None,
             status: "选择一首歌，然后开始。".into(),
             status_ok: None,
             progress: 0.0,
@@ -200,12 +203,11 @@ impl App {
                 });
             }
             Mode::Auto => {
-                let model = self.demucs_model.clone();
                 let keep = self.keep_stems;
                 self.indeterminate = true;
                 self.status = format!("自动分离 {} 个文件（Demucs，较慢）…", inputs.len());
                 std::thread::spawn(move || {
-                    let res = run_batch_auto(&inputs, &outdir, model, keep, tx.clone());
+                    let res = run_batch_auto(&inputs, &outdir, keep, tx.clone());
                     let _ = tx.send(Msg::Done(res));
                 });
             }
@@ -215,15 +217,40 @@ impl App {
     fn poll(&mut self) {
         let Some(rx) = &self.rx else { return };
         let mut done = None;
-        while let Ok(m) = rx.try_recv() {
-            match m {
-                Msg::Progress(a, b) => {
+        // 必须区分 Empty 和 Disconnected。worker 线程一旦 panic，tx 被 drop，
+        // try_recv 返回 Disconnected；旧代码用 `while let Ok(..)` 把两种情况
+        // 一起吞掉，done 永远是 None、running 永远是 true —— 进度条冻住、
+        // 「开始重混」永久置灰，除了重启程序没有任何恢复路径。
+        let mut worker_died = false;
+        loop {
+            match rx.try_recv() {
+                Ok(Msg::Progress(a, b)) => {
                     self.progress = if b > 0 { a as f32 / b as f32 } else { 0.0 };
                     self.indeterminate = false;
                 }
-                Msg::Stage(s) => self.status = s,
-                Msg::Done(r) => done = Some(r),
+                Ok(Msg::Stage(s)) => self.status = s,
+                Ok(Msg::Done(r)) => done = Some(r),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    worker_died = true;
+                    break;
+                }
             }
+        }
+        if worker_died && done.is_none() {
+            // worker 崩了且没来得及发 Done。这里必须把界面解锁并给出可读说明，
+            // 不能让用户对着一个永远不动的进度条。
+            self.running = false;
+            self.rx = None;
+            self.indeterminate = false;
+            self.progress = 0.0;
+            self.started = None;
+            self.status =
+                "后台线程异常退出（多半是处理某个文件时 panic）。本次任务已中止，\
+                 可以直接重新开始；先单独试那个可疑文件更容易定位。"
+                    .to_string();
+            self.status_ok = Some(false);
+            return;
         }
         if let Some(r) = done {
             self.running = false;
@@ -298,14 +325,38 @@ impl eframe::App for App {
         }
 
         // 主题 / 强调色 / 透明度一变就存盘，下次启动直接恢复。
+        // 但拖动透明度滑块时每一帧的值都不同，逐帧落盘会在一次 3 秒的拖动里写
+        // 上百次 ~/.config/upmix-gui/config.txt。所以拖动过程中不写，松手那一帧
+        // 签名仍然不同，自然补上一次。
         let sig = (
             self.theme.id.to_string(),
             self.accent.to_srgba_unmultiplied(),
             (self.card_alpha * 255.0) as u8,
         );
-        if self.last_saved.as_ref() != Some(&sig) {
+        let dragging = ui.ctx().input(|i| i.pointer.primary_down());
+        if self.last_saved.as_ref() != Some(&sig) && !dragging {
             save_config(self.theme.id, self.accent, self.card_alpha);
             self.last_saved = Some(sig);
+        }
+
+        // 应用内文件 / 目录选择器（不调外部文件管理器）。见 picker.rs 顶部注释。
+        if self.picker.is_some() {
+            // 先克隆主题，避免同时可变借用 self.picker 和不可变借用 self.theme。
+            let theme = self.theme.clone();
+            let got = self
+                .picker
+                .as_mut()
+                .map(|p| (p.target(), p.show(ui.ctx(), &theme)));
+            if let Some((target, act)) = got {
+                match act {
+                    PickAction::Pending => {}
+                    PickAction::Cancel => self.picker = None,
+                    PickAction::Done(out) => {
+                        self.picker = None;
+                        self.apply_pick(target, out);
+                    }
+                }
+            }
         }
 
         egui::CentralPanel::default()
@@ -389,23 +440,16 @@ impl App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui.button("选择文件…").clicked() {
-                    // sort() 会打乱下标：不重算的话 selected 会指到另一首歌上，
-                    // 用户以为选的是 A，点开始转出来的是 B。
-                    let keep = self.selected.and_then(|i| self.files.get(i).cloned());
-                    for p in pick_audio_files() {
-                        if !self.files.iter().any(|f| f == &p) {
-                            self.files.push(p);
-                        }
-                    }
-                    self.files.sort();
-                    self.selected = keep.and_then(|p| self.files.iter().position(|f| *f == p));
+                    // 起始目录：优先当前选中那首歌所在的地方。
+                    let start = self
+                        .files
+                        .get(self.selected.unwrap_or(0))
+                        .cloned()
+                        .unwrap_or_else(|| expand(&self.indir));
+                    self.picker = Some(Picker::new(PickTarget::Files, start));
                 }
                 if ui.button("选择文件夹…").clicked() {
-                    if let Some(d) = pick_music_dir() {
-                        self.indir = d.to_string_lossy().into_owned();
-                        self.files = scan_dir(&self.indir);
-                        self.selected = None;
-                    }
+                    self.picker = Some(Picker::new(PickTarget::InputDir, expand(&self.indir)));
                 }
             });
             ui.add_space(2.0);
@@ -443,11 +487,21 @@ impl App {
             ui.checkbox(&mut self.batch, "批量处理列表全部");
             ui.horizontal(|ui| {
                 ui.label(RichText::new("输出目录").color(self.theme.ink2));
+                // 给右边的「选择…」留位置，否则 available_width() 会把按钮挤出可视区。
+                let w = (ui.available_width() - 84.0).max(120.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.outdir)
                         .hint_text("留空 = 源文件旁")
-                        .desired_width(ui.available_width()),
+                        .desired_width(w),
                 );
+                if ui.button("选择…").clicked() {
+                    let start = if self.outdir.trim().is_empty() {
+                        expand(&self.indir)
+                    } else {
+                        expand(&self.outdir)
+                    };
+                    self.picker = Some(Picker::new(PickTarget::OutputDir, start));
+                }
             });
         });
 
@@ -490,16 +544,23 @@ impl App {
                     });
                 }
                 Mode::Auto => {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Demucs 模型").color(self.theme.ink2));
-                        for m in ["htdemucs", "htdemucs_ft", "mdx_extra", "mdx_extra_q"] {
-                            ui.selectable_value(&mut self.demucs_model, m.to_string(), m);
-                        }
-                    });
+                    // 内置引擎的模型是写死的（core/src/builtin_sep.rs 里
+                    // ensure_model("htdemucs_ort_v1")）。以前这里摆了一个
+                    // 4 选 1 的下拉框，选完照样跑 htdemucs —— 用户以为选了
+                    // 量化快模型，实际仍是 5× 实时，白等几十分钟。与其骗人
+                    // 不如说清楚，想要别的变体走命令行的 --external-demucs。
                     ui.label(
-                        RichText::new("htdemucs 均衡；_ft 最好但更慢；mdx_*_q 量化、更快。")
-                            .size(12.0)
-                            .color(self.theme.ink3),
+                        RichText::new("分离模型：htdemucs（ONNX 版，内置固定）")
+                            .color(self.theme.ink2),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "纯 CPU 推理，不需要 Python、不联网。\
+                             要 htdemucs_ft / mdx_extra 这些变体，请用命令行的 \
+                             --external-demucs 配自己装的 demucs。",
+                        )
+                        .size(12.0)
+                        .color(self.theme.ink3),
                     );
                     ui.checkbox(&mut self.keep_stems, "保留分离出的 stems");
                     ui.label(
@@ -577,6 +638,34 @@ impl App {
         ));
     }
 
+    /// 把应用内选择器的结果写回对应字段。
+    fn apply_pick(&mut self, target: PickTarget, out: PickOutcome) {
+        match (target, out) {
+            (PickTarget::Files, PickOutcome::Files(paths)) => {
+                // sort() 会打乱下标：不重算的话 selected 会指到另一首歌上，
+                // 用户以为选的是 A，点开始转出来的是 B。
+                let keep = self.selected.and_then(|i| self.files.get(i).cloned());
+                for p in paths {
+                    if !self.files.iter().any(|f| f == &p) {
+                        self.files.push(p);
+                    }
+                }
+                self.files.sort();
+                self.selected = keep.and_then(|p| self.files.iter().position(|f| *f == p));
+            }
+            (PickTarget::InputDir, PickOutcome::Dir(d)) => {
+                self.indir = d.to_string_lossy().into_owned();
+                self.files = scan_dir(&self.indir);
+                self.selected = None;
+            }
+            (PickTarget::OutputDir, PickOutcome::Dir(d)) => {
+                self.outdir = d.to_string_lossy().into_owned();
+            }
+            // 选择器只会在匹配的模式下产出对应结果，这里只是兜底。
+            _ => {}
+        }
+    }
+
     pub fn set_wallpaper(&mut self, ctx: &egui::Context, path: &Path) {
         match theme::load_wallpaper(ctx, path) {
             Ok(tex) => {
@@ -640,8 +729,14 @@ impl App {
                     dirty = true;
                 }
                 if ui.small_button("重置透明度").clicked() {
-                    self.card_alpha = self.theme.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
-                    dirty = true;
+                    // 必须取「预设里」的默认 alpha。self.theme.card 的 alpha 在
+                    // ui() 开头（见上面 layered() 那段）就已经被 card_alpha 覆写
+                    // 过了，拿它当默认值等于把 card_alpha 赋给它自己 —— 这个按钮
+                    // 以前是永久空操作，点了没任何反应。
+                    if let Some(t) = theme::presets().iter().find(|t| t.id == self.theme.id) {
+                        self.card_alpha = t.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
+                        dirty = true;
+                    }
                 }
             }
             ui.add_space(4.0);
@@ -893,101 +988,8 @@ fn tab_tutorial(ui: &mut egui::Ui, t: &Theme) {
     });
 }
 
-/// 选多个音频文件——调系统自己的文件对话框。
-fn pick_audio_files() -> Vec<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        return zenity_dialog(false);
-    }
-    #[cfg(target_os = "windows")]
-    {
-        return powershell_dialog(false);
-    }
-    #[allow(unreachable_code)]
-    Vec::new()
-}
-
-/// 选一个文件夹。
-fn pick_music_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        return zenity_dialog(true).into_iter().next();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        return powershell_dialog(true).into_iter().next();
-    }
-    #[allow(unreachable_code)]
-    None
-}
-
-/// Linux：zenity（GNOME 的文件选择器，走 GTK 原生对话框）。
-#[cfg(target_os = "linux")]
-fn zenity_dialog(dir: bool) -> Vec<PathBuf> {
-    let mut c = std::process::Command::new("zenity");
-    c.arg("--file-selection");
-    if dir {
-        c.arg("--directory").arg("--title=选择音乐文件夹");
-    } else {
-        // 过滤器跟着 core 的统一列表走，别再手写一份只认 flac/wav 的。
-        let pats: Vec<String> = upmix_core::fileio::INPUT_EXTS
-            .iter()
-            .map(|e| format!("*.{e}"))
-            .collect();
-        let joined = pats.join(" ");
-        c.arg("--multiple")
-            .arg("--separator=\n")
-            .arg(format!("--file-filter=音频 | {joined}"))
-            .arg("--file-filter=所有文件 | *")
-            .arg("--title=选择音乐文件（可多选）");
-    }
-    let Ok(out) = c.output() else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .collect()
-}
-
-/// Windows：PowerShell 调 WinForms 的 OpenFileDialog / FolderBrowserDialog，
-/// 就是资源管理器里那个原生对话框。-STA 是 WinForms 必须的。
-#[cfg(target_os = "windows")]
-fn powershell_dialog(dir: bool) -> Vec<PathBuf> {
-    let script = if dir {
-        r#"Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = '选择音乐文件夹'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }"#.to_string()
-    } else {
-        // 过滤器从 core 的 INPUT_EXTS 生成，避免和 core 支持的格式脱节。
-        let exts: Vec<String> = upmix_core::fileio::INPUT_EXTS
-            .iter()
-            .map(|e| format!("*.{e}"))
-            .collect();
-        let semi = exts.join(";");
-        format!(
-            r#"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Multiselect = $true; $f.Title = '选择音乐文件（可多选）'; $f.Filter = '音频 ({semi})|{semi}|所有文件 (*.*)|*.*'; if ($f.ShowDialog() -eq 'OK') {{ [Console]::Out.Write(($f.FileNames -join [Environment]::NewLine)) }}"#
-        )
-    };
-    let Ok(out) = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-STA", "-Command", &script])
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .collect()
-}
-
 /// 展开 `~/`（Linux/macOS）或 `~\` 风格路径；拼接一律交给 PathBuf，Windows 会自己用 `\`。
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     let p = path.trim();
     if p == "~" {
         if let Some(h) = std::env::var_os("HOME") {
@@ -1058,17 +1060,36 @@ fn save_config(theme_id: &str, accent: egui::Color32, alpha: f32) {
     std::fs::write(p, body).ok();
 }
 
-fn out_path_for(input: &Path, outdir: &str) -> PathBuf {
+/// 某个输入对应的输出路径。
+///
+/// `used` 用来消解同名冲突。批量选目录时很容易选进两个都含 `song.flac` 的子
+/// 目录（或者同一目录下同时有 `song.flac` 和 `song.wav`），它们的输出都叫
+/// `song_5.1.flac`——直接写会**静默互相覆盖**，而界面还报「完成 2 首」，
+/// 用户最后只拿到一个文件。第二个起加 `(2)`、`(3)` 后缀。
+fn out_path_for(input: &Path, outdir: &str, used: &mut HashSet<PathBuf>) -> PathBuf {
     let stem = input
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("track");
-    let name = format!("{stem}_5.1.flac");
-    if outdir.is_empty() {
-        input.with_file_name(name)
+    let dir = if outdir.is_empty() {
+        input
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
     } else {
-        PathBuf::from(outdir).join(name)
+        // 必须展开 `~`：输入目录走的是 expand()，输出目录以前直接 PathBuf::from，
+        // 于是填 `~/Music/5.1` 会在当前工作目录下建一个字面名为 `~` 的目录，
+        // 文件写到 <CWD>/~/Music/5.1/ 里，用户在自己指定的位置找不到。
+        expand(outdir)
+    };
+    let mut path = dir.join(format!("{stem}_5.1.flac"));
+    let mut n = 2u32;
+    while used.contains(&path) {
+        path = dir.join(format!("{stem} ({n})_5.1.flac"));
+        n += 1;
     }
+    used.insert(path.clone());
+    path
 }
 
 fn prepare(out_path: &Path) {
@@ -1089,6 +1110,8 @@ fn run_batch_fast(
     // （或读取失败），后面的歌一首都不会处理，用户只看到一条报错。
     // 现在逐个处理，坏的记下来继续，最后统一报告。
     let mut skipped: Vec<String> = Vec::new();
+    // 同名输出冲突的登记表，见 out_path_for 的注释。
+    let mut used: HashSet<PathBuf> = HashSet::new();
     for (i, input) in inputs.iter().enumerate() {
         let _ = tx.send(Msg::Stage(format!(
             "快速重混 [{}/{}] {}",
@@ -1125,7 +1148,7 @@ fn run_batch_fast(
                 continue;
             }
         };
-        let out_path = out_path_for(input, outdir);
+        let out_path = out_path_for(input, outdir, &mut used);
         prepare(&out_path);
         match upmix_core::fileio::write_any(&out_path, &out, Some(input)) {
             Ok(()) => last = out_path,
@@ -1151,13 +1174,14 @@ fn run_batch_fast(
 fn run_batch_auto(
     inputs: &[PathBuf],
     outdir: &str,
-    model: String,
     keep: bool,
     tx: Sender<Msg>,
 ) -> Result<PathBuf, String> {
     let total = inputs.len();
     let mut last = PathBuf::new();
     let mut skipped: Vec<String> = Vec::new();
+    // 同名输出冲突的登记表，见 out_path_for 的注释。
+    let mut used: HashSet<PathBuf> = HashSet::new();
     for (i, input) in inputs.iter().enumerate() {
         let _ = tx.send(Msg::Stage(format!(
             "自动分离 [{}/{}] {}",
@@ -1166,7 +1190,7 @@ fn run_batch_auto(
             file_name(input)
         )));
         // 同上：一个文件坏了不能把整批带走。
-        match run_one_auto(input, outdir, &model, keep, &tx) {
+        match run_one_auto(input, outdir, keep, &tx, &mut used) {
             Ok(p) => last = p,
             Err(e) => skipped.push(format!("{}：{e}", file_name(input))),
         }
@@ -1189,9 +1213,9 @@ fn run_batch_auto(
 fn run_one_auto(
     input: &Path,
     outdir: &str,
-    model: &str,
     keep: bool,
     tx: &Sender<Msg>,
+    used: &mut HashSet<PathBuf>,
 ) -> Result<PathBuf, String> {
     let tmp = std::env::temp_dir().join("upmix-stem-cache");
     std::fs::create_dir_all(&tmp).ok();
@@ -1201,7 +1225,6 @@ fn run_one_auto(
         .unwrap_or("track");
 
     let _ = tmp;
-    let _ = model;
 
     // 内置引擎：纯 Rust + ONNX Runtime，不需要 Python、不联网。
     let _ = tx.send(Msg::Stage("读取音频 …".into()));
@@ -1252,24 +1275,34 @@ fn run_one_auto(
     if peak > 1.0 {
         out.apply_gain(1.0 / peak);
     }
-    let out_path = out_path_for(input, outdir);
+    let out_path = out_path_for(input, outdir, used);
     prepare(&out_path);
     upmix_core::fileio::write_any(&out_path, &out, Some(input)).map_err(|e| e.to_string())?;
     // “保留 stems”：把四轨写一份出来，方便回看。
+    //
+    // 这一步失败**不能**把已经写好的 5.1 输出变成「失败」——主产物早就落盘了。
+    // 以前这里一路用 `?`，只要 stems 目录建不出来（磁盘满、权限、路径被占），
+    // 整首就会被记成「跳过」，用户以为白跑了，实际上 5.1 文件好好躺在那儿。
     if keep {
-        std::fs::create_dir_all(&tmp)
-            .map_err(|e| format!("建 stems 目录 {} 失败：{e}", tmp.display()))?;
-        for (n, b) in [
-            ("vocals", &stems.vocals),
-            ("drums", &stems.drums),
-            ("bass", &stems.bass),
-            ("other", &stems.other),
-        ] {
-            // 以前这里是 `let _ =`：写失败用户完全看不到，开了「保留 stems」
-            // 却什么都没得到，还以为是程序没做。
-            let p = tmp.join(format!("{track}_{n}.wav"));
-            upmix_core::fileio::write_any(&p, b, None)
-                .map_err(|e| format!("写 stems {} 失败：{e}", p.display()))?;
+        let write_stems = || -> Result<(), String> {
+            std::fs::create_dir_all(&tmp)
+                .map_err(|e| format!("建 stems 目录 {} 失败：{e}", tmp.display()))?;
+            for (n, b) in [
+                ("vocals", &stems.vocals),
+                ("drums", &stems.drums),
+                ("bass", &stems.bass),
+                ("other", &stems.other),
+            ] {
+                let p = tmp.join(format!("{track}_{n}.wav"));
+                upmix_core::fileio::write_any(&p, b, None)
+                    .map_err(|e| format!("写 stems {} 失败：{e}", p.display()))?;
+            }
+            Ok(())
+        };
+        if let Err(e) = write_stems() {
+            // 让人知道，但主产物算成功。
+            let _ = tx.send(Msg::Stage(format!("stems 没写成（{e}），5.1 输出不受影响")));
+            eprintln!("stems 没写成：{e}（5.1 输出不受影响）");
         }
     }
     Ok(out_path)

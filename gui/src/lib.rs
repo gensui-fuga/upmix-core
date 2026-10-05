@@ -1,6 +1,7 @@
 //! Shared egui GUI for upmix-core — warm-paper / liquid-glass themes, desktop.
 
 pub mod app;
+pub mod picker;
 pub mod theme;
 
 pub use app::App;
