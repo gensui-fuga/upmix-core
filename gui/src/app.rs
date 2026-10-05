@@ -2,6 +2,7 @@
 
 use eframe::egui;
 use egui::RichText;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
@@ -320,12 +321,16 @@ impl eframe::App for App {
         }
 
         // 主题 / 强调色 / 透明度一变就存盘，下次启动直接恢复。
+        // 但拖动透明度滑块时每一帧的值都不同，逐帧落盘会在一次 3 秒的拖动里写
+        // 上百次 ~/.config/upmix-gui/config.txt。所以拖动过程中不写，松手那一帧
+        // 签名仍然不同，自然补上一次。
         let sig = (
             self.theme.id.to_string(),
             self.accent.to_srgba_unmultiplied(),
             (self.card_alpha * 255.0) as u8,
         );
-        if self.last_saved.as_ref() != Some(&sig) {
+        let dragging = ui.ctx().input(|i| i.pointer.primary_down());
+        if self.last_saved.as_ref() != Some(&sig) && !dragging {
             save_config(self.theme.id, self.accent, self.card_alpha);
             self.last_saved = Some(sig);
         }
@@ -669,8 +674,14 @@ impl App {
                     dirty = true;
                 }
                 if ui.small_button("重置透明度").clicked() {
-                    self.card_alpha = self.theme.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
-                    dirty = true;
+                    // 必须取「预设里」的默认 alpha。self.theme.card 的 alpha 在
+                    // ui() 开头（见上面 layered() 那段）就已经被 card_alpha 覆写
+                    // 过了，拿它当默认值等于把 card_alpha 赋给它自己 —— 这个按钮
+                    // 以前是永久空操作，点了没任何反应。
+                    if let Some(t) = theme::presets().iter().find(|t| t.id == self.theme.id) {
+                        self.card_alpha = t.card.to_srgba_unmultiplied()[3] as f32 / 255.0;
+                        dirty = true;
+                    }
                 }
             }
             ui.add_space(4.0);
@@ -1087,20 +1098,36 @@ fn save_config(theme_id: &str, accent: egui::Color32, alpha: f32) {
     std::fs::write(p, body).ok();
 }
 
-fn out_path_for(input: &Path, outdir: &str) -> PathBuf {
+/// 某个输入对应的输出路径。
+///
+/// `used` 用来消解同名冲突。批量选目录时很容易选进两个都含 `song.flac` 的子
+/// 目录（或者同一目录下同时有 `song.flac` 和 `song.wav`），它们的输出都叫
+/// `song_5.1.flac`——直接写会**静默互相覆盖**，而界面还报「完成 2 首」，
+/// 用户最后只拿到一个文件。第二个起加 `(2)`、`(3)` 后缀。
+fn out_path_for(input: &Path, outdir: &str, used: &mut HashSet<PathBuf>) -> PathBuf {
     let stem = input
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("track");
-    let name = format!("{stem}_5.1.flac");
-    if outdir.is_empty() {
-        input.with_file_name(name)
+    let dir = if outdir.is_empty() {
+        input
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
     } else {
         // 必须展开 `~`：输入目录走的是 expand()，输出目录以前直接 PathBuf::from，
         // 于是填 `~/Music/5.1` 会在当前工作目录下建一个字面名为 `~` 的目录，
         // 文件写到 <CWD>/~/Music/5.1/ 里，用户在自己指定的位置找不到。
-        expand(outdir).join(name)
+        expand(outdir)
+    };
+    let mut path = dir.join(format!("{stem}_5.1.flac"));
+    let mut n = 2u32;
+    while used.contains(&path) {
+        path = dir.join(format!("{stem} ({n})_5.1.flac"));
+        n += 1;
     }
+    used.insert(path.clone());
+    path
 }
 
 fn prepare(out_path: &Path) {
@@ -1121,6 +1148,8 @@ fn run_batch_fast(
     // （或读取失败），后面的歌一首都不会处理，用户只看到一条报错。
     // 现在逐个处理，坏的记下来继续，最后统一报告。
     let mut skipped: Vec<String> = Vec::new();
+    // 同名输出冲突的登记表，见 out_path_for 的注释。
+    let mut used: HashSet<PathBuf> = HashSet::new();
     for (i, input) in inputs.iter().enumerate() {
         let _ = tx.send(Msg::Stage(format!(
             "快速重混 [{}/{}] {}",
@@ -1157,7 +1186,7 @@ fn run_batch_fast(
                 continue;
             }
         };
-        let out_path = out_path_for(input, outdir);
+        let out_path = out_path_for(input, outdir, &mut used);
         prepare(&out_path);
         match upmix_core::fileio::write_any(&out_path, &out, Some(input)) {
             Ok(()) => last = out_path,
@@ -1189,6 +1218,8 @@ fn run_batch_auto(
     let total = inputs.len();
     let mut last = PathBuf::new();
     let mut skipped: Vec<String> = Vec::new();
+    // 同名输出冲突的登记表，见 out_path_for 的注释。
+    let mut used: HashSet<PathBuf> = HashSet::new();
     for (i, input) in inputs.iter().enumerate() {
         let _ = tx.send(Msg::Stage(format!(
             "自动分离 [{}/{}] {}",
@@ -1197,7 +1228,7 @@ fn run_batch_auto(
             file_name(input)
         )));
         // 同上：一个文件坏了不能把整批带走。
-        match run_one_auto(input, outdir, keep, &tx) {
+        match run_one_auto(input, outdir, keep, &tx, &mut used) {
             Ok(p) => last = p,
             Err(e) => skipped.push(format!("{}：{e}", file_name(input))),
         }
@@ -1222,6 +1253,7 @@ fn run_one_auto(
     outdir: &str,
     keep: bool,
     tx: &Sender<Msg>,
+    used: &mut HashSet<PathBuf>,
 ) -> Result<PathBuf, String> {
     let tmp = std::env::temp_dir().join("upmix-stem-cache");
     std::fs::create_dir_all(&tmp).ok();
@@ -1281,7 +1313,7 @@ fn run_one_auto(
     if peak > 1.0 {
         out.apply_gain(1.0 / peak);
     }
-    let out_path = out_path_for(input, outdir);
+    let out_path = out_path_for(input, outdir, used);
     prepare(&out_path);
     upmix_core::fileio::write_any(&out_path, &out, Some(input)).map_err(|e| e.to_string())?;
     // “保留 stems”：把四轨写一份出来，方便回看。

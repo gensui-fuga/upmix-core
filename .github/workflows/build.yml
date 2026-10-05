@@ -123,11 +123,14 @@ jobs:
 
       - name: 备好内置分离模型（auto 模式端到端要用）
         # 从源码编译出来的二进制旁边没有 models/，auto 模式的端到端会直接报
-        # 「找不到 models/ 目录」。发行包自带它，CI 里得先自己拉一份。
+        # 「找不到 models/ 目录」。注意模型和 ffmpeg 一样是按「二进制旁边优先」
+        # 找的（builtin_sep 里先看 current_exe().parent()，再回落 CWD），而
+        # ci/e2e.sh 会 cd 到临时目录，所以必须放到 target/release/ 下 ——
+        # 这也正好是发行包里的真实布局。
         run: |
           set -eux
-          ./target/release/upmix-core --prepare-model
-          test -d models
+          ./target/release/upmix-core --prepare-model --outdir target/release/models
+          test -d target/release/models
 
       - name: 端到端功能测试（真二进制 + 真音频）
         # 单元测试只覆盖纯逻辑，而用户踩到的坑全在「真二进制 + 真文件」这条路上：
