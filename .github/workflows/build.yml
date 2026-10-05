@@ -125,7 +125,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libxkbcommon-dev libwayland-dev libx11-dev \
-            libgl1-mesa-dev libgtk-3-dev pkg-config
+            libgl1-mesa-dev libgtk-3-dev pkg-config \
+            flac
+          # 装上 flac CLI：用户机器上只要装了 flac（Arch 上很常见），写 FLAC 就
+          # 走它而不是内置编码器。之前 CI 里没有 flac，于是 write_cli 这条路径
+          # 一次都没被执行过——它坏掉了 CI 也是绿的。内置编码器那条路由
+          # flac.rs 里直接调 write_enc / 12-20bit 回退的用例覆盖，两条都不落下。
+          flac --version
 
       - uses: Swatinem/rust-cache@v2
 
