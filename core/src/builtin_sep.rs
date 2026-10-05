@@ -7,8 +7,52 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::io::pcm::AudioBuffer;
+use stem_splitter_core::model::model_manager::ModelHandle;
+
+/// 引擎的加载结果，只算一次。
+static ENGINE_ONCE: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// 只跑一次的闸门。
+///
+/// 抽成独立函数是为了能测：`separate()` 里用的是同一个机制，测试用局部的
+/// `OnceLock` + 计数器闭包，验的是这段真代码而不是复刻品。
+fn run_once(
+    slot: &OnceLock<Result<(), String>>,
+    f: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    slot.get_or_init(f).clone()
+}
+
+/// 真正把推理引擎拉起来：定后端 → 建 ORT 会话。
+///
+/// **为什么必须只调一次**：`stem_splitter_core::core::engine::preload()` 里
+/// 只有 `ORT_INIT` 那一步是 `OnceCell`；其余每次都跑——包括
+/// `ep::create_best_session()`，它会重新加载模型、重新探测执行提供者，然后
+/// 因为 `SESSION` 早已设置而被 `OnceCell::set(..).ok()` **静默丢弃**。
+///
+/// 单个文件只建一次会话，看不出问题；批量模式是每个文件建一次、丢一次。
+/// 用户实测（Windows + 自动分离）正是"单个能转、批量跑到第二个文件整窗消失"
+/// ——反复建/毁 ORT 会话把内存吃穿，分配失败直接 abort，窗口瞬间没了。
+/// 顺带这里也是批量慢的元凶：本来每个文件都在白读一遍 200MB 模型。
+fn load_engine(handle: &ModelHandle) -> Result<(), String> {
+    // 后端选择必须在 preload 之前落地：ORT 的 EP 是在建会话时定的。
+    match crate::backend::apply_pending() {
+        Ok(b) => {
+            if b != crate::backend::Backend::Auto {
+                eprintln!("ℹ️  推理后端：{}", crate::backend::describe());
+            }
+        }
+        Err(e) => {
+            // 选择不可行时回退自动，绝不让推理挂掉。
+            eprintln!("warning: {e}；本次改用自动选择");
+        }
+    }
+    stem_splitter_core::core::engine::preload(handle)
+        .map_err(|e| format!("加载 ONNX 模型失败: {e}"))
+}
 
 /// 四个 stem 的 PCM（都是 44.1kHz 立体声）。
 pub struct StemAudio {
@@ -91,22 +135,9 @@ pub fn separate(buf: &AudioBuffer) -> Result<StemAudio> {
     )?;
     let handle = local_handle(&dir).context("models/ 里的 manifest.json 或 *.onnx 读不了")?;
 
-    // 后端选择必须在 preload 之前落地：ORT 的 EP 是在建会话时定的，而且
-    // preload 本身是一次性（OnceCell）的，跑过就换不了。
-    match crate::backend::apply_pending() {
-        Ok(b) => {
-            if b != crate::backend::Backend::Auto {
-                eprintln!("ℹ️  推理后端：{}", crate::backend::describe());
-            }
-        }
-        Err(e) => {
-            // 选择不可行时回退自动，绝不让推理挂掉。
-            eprintln!("warning: {e}；本次改用自动选择");
-        }
-    }
-
-    stem_splitter_core::core::engine::preload(&handle)
-        .map_err(|e| anyhow::anyhow!("加载 ONNX 模型失败: {e}"))?;
+    // 引擎只拉一次。以前这里是裸调 preload：批量模式下每个文件都会重建一遍
+    // ORT 会话（见 load_engine 的说明），Windows 上第二个文件就闪退。
+    run_once(&ENGINE_ONCE, || load_engine(&handle)).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mf = stem_splitter_core::core::engine::manifest();
     if mf.sample_rate != 44100 {
@@ -201,4 +232,52 @@ pub fn separate(buf: &AudioBuffer) -> Result<StemAudio> {
         bass: mk(it.next().unwrap(), it.next().unwrap()),
         other: mk(it.next().unwrap(), it.next().unwrap()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 闸门必须只放行一次——批量闪退就是因为它以前没闸门，每个文件都重建
+    /// 一遍 ORT 会话。这个测试盯的是 `separate()` 实际使用的那段机制。
+    #[test]
+    fn run_once_calls_the_loader_exactly_once() {
+        let slot: OnceLock<Result<(), String>> = OnceLock::new();
+        let calls = AtomicUsize::new(0);
+
+        for _ in 0..5 {
+            run_once(&slot, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "加载器被跑了不止一次");
+
+        // 换一个闭包也不能再跑：证明真的在复用第一次的结果。
+        run_once(&slot, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "第二次的闭包仍然被执行了");
+    }
+
+    /// 失败也要记住：不能每个文件都重来一遍加载模型这种重活。
+    #[test]
+    fn run_once_caches_failure_without_retrying() {
+        let slot: OnceLock<Result<(), String>> = OnceLock::new();
+        let calls = AtomicUsize::new(0);
+        let boom = |c: &AtomicUsize| -> Result<(), String> {
+            c.fetch_add(1, Ordering::SeqCst);
+            Err("模型读不了".to_string())
+        };
+
+        let e1 = run_once(&slot, || boom(&calls)).unwrap_err();
+        let e2 = run_once(&slot, || boom(&calls)).unwrap_err();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "失败后又被重试了一次");
+        assert_eq!(e1, "模型读不了");
+        assert_eq!(e2, "模型读不了");
+    }
 }
