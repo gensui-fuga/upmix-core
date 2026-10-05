@@ -208,6 +208,29 @@ jobs:
           ./target/release/upmix-core --prepare-model --outdir models
           ls -la models/
 
+      - name: 自动分离批量冒烟测试（验引擎只加载一次）
+        # 朋友实测：Windows + 自动分离，单个文件能转、批量跑到第二个文件整窗消失。
+        # 成因是每个文件都重建一遍 ORT 会话（见 core/src/builtin_sep.rs 的 load_engine）。
+        # 这里跑 2 个文件的自动分离批量，数引擎实际加载了几次：
+        # 修好后 = 1 次；把这个闸门去掉 = 2 次。模型和 ffmpeg 上一步都已就位。
+        env:
+          UPMIX_TRACE_ENGINE: "1"
+        run: |
+          set -eux
+          mkdir -p smoke/in
+          ./dist-ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "sine=frequency=440:duration=4" -ac 2 -ar 44100 smoke/in/a.wav
+          ./dist-ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "sine=frequency=330:duration=4" -ac 2 -ar 44100 smoke/in/b.wav
+          ./target/release/upmix-core --batch smoke/in --mode auto --outdir smoke/out \
+            > smoke/log.txt 2>&1 || { cat smoke/log.txt; exit 1; }
+          cat smoke/log.txt
+          N=$(grep -c '^upmix-engine-load$' smoke/log.txt || true)
+          echo "引擎实际加载次数 = $N（期望 1）"
+          test "$N" -eq 1
+          test -f smoke/out/a_5.1.flac
+          test -f smoke/out/b_5.1.flac
+
       - uses: actions/upload-artifact@v4
         with:
           name: upmix-linux
