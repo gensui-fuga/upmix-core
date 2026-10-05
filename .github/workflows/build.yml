@@ -170,7 +170,9 @@ jobs:
       - name: 构建
         env:
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
-        run: cargo build --release
+        # 和 linux 侧一样用 --locked：Windows 也得按锁文件里的版本编，
+        # 否则同一个 tag 在两个平台上解析出的依赖可能不是同一套。
+        run: cargo build --release --locked
 
       - name: 取静态 ffmpeg（随包分发）
         shell: pwsh
