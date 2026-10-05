@@ -2950,7 +2950,7 @@ checksum = "1fc81956842c57dac11422a97c3b8195a1ff727f06e85c84ed2e8aa277c9a0fd"
 
 [[package]]
 name = "upmix-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "upmix-core",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "upmix-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2971,7 +2971,7 @@ dependencies = [
 
 [[package]]
 name = "upmix-gui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -2985,7 +2985,7 @@ dependencies = [
 
 [[package]]
 name = "upmix-tui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "crossterm",

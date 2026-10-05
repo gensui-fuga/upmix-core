@@ -44,6 +44,8 @@ done
 BIN=$(readlink -f "$BIN")
 FFMPEG=$(readlink -f "$FFMPEG")
 FFPROBE=$(readlink -f "$FFPROBE")
+# 仓库根目录。后面会 cd 到临时目录，所以先算出来。
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
@@ -67,6 +69,13 @@ chan_db() {
 # =====================================================================
 section "0. 造素材"
 # =====================================================================
+# 二进制自报的版本必须和 Cargo.toml 一致。版本号错了不会让任何功能失败，
+# 但发出去的包会带着错误的版本——只有在这里拦得住。
+CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -1)
+BIN_VER=$("$BIN" --version 2>&1 | head -1 | awk '{print $NF}')
+eq "二进制版本与 Cargo.toml 一致" "$CARGO_VER" "$BIN_VER"
+echo "     版本：$BIN_VER"
+
 "$FFMPEG" -hide_banner -loglevel error -y -f lavfi -i "color=c=#3366cc:s=64x64:d=1" -frames:v 1 cover.png
 
 # 立体声：440Hz + 60Hz，带全套标签和歌词
