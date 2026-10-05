@@ -68,6 +68,29 @@ jobs:
           ./target/release/upmix-core --prepare-model --outdir models
           ls -la models/
 
+      - name: 自动分离批量冒烟测试（验引擎只加载一次）
+        # 朋友实测：Windows + 自动分离，单个文件能转、批量跑到第二个文件整窗消失。
+        # 成因是每个文件都重建一遍 ORT 会话（见 core/src/builtin_sep.rs 的 load_engine）。
+        # 这里跑 2 个文件的自动分离批量，数引擎实际加载了几次：
+        # 修好后 = 1 次；把这个闸门去掉 = 2 次。模型和 ffmpeg 上一步都已就位。
+        env:
+          UPMIX_TRACE_ENGINE: "1"
+        run: |
+          set -eux
+          mkdir -p smoke/in
+          ./dist-ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "sine=frequency=440:duration=4" -ac 2 -ar 44100 smoke/in/a.wav
+          ./dist-ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "sine=frequency=330:duration=4" -ac 2 -ar 44100 smoke/in/b.wav
+          ./target/release/upmix-core --batch smoke/in --mode auto --outdir smoke/out \
+            > smoke/log.txt 2>&1 || { cat smoke/log.txt; exit 1; }
+          cat smoke/log.txt
+          N=$(grep -c '^upmix-engine-load$' smoke/log.txt || true)
+          echo "引擎实际加载次数 = $N（期望 1）"
+          test "$N" -eq 1
+          test -f smoke/out/a_5.1.flac
+          test -f smoke/out/b_5.1.flac
+
       - uses: actions/upload-artifact@v4
         with:
           name: upmix-linux
@@ -111,9 +134,68 @@ jobs:
             target/release/*.exe
             ffmpeg.exe
 
+  wine-auto-batch:
+    # 朋友实测：Windows + 自动分离，单个文件能转、批量跑到第二个文件整窗消失。
+    # 这里用 Wine 跑**真正的 Windows 产物**，把批量自动分离整条路走一遍，数引擎
+    # 实际加载了几次：旧行为 = 每个文件一次，修好后 = 1 次。
+    # 注意：Wine 不是 Windows。它能证明这条路在 Windows 二进制上跑得通、引擎只
+    # 加载一次；不能替代朋友在真机上复测。
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: upmix-windows
+          path: win
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: upmix-linux
+          path: lin
+
+      - name: 装 Wine
+        run: |
+          set -eux
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb wine64 \
+            || sudo apt-get install -y --no-install-recommends xvfb wine
+          (command -v wine || command -v wine64)
+          (wine --version || wine64 --version)
+
+      - name: Wine 下跑自动分离批量（2 个文件）
+        env:
+          UPMIX_TRACE_ENGINE: "1"
+          WINEDEBUG: "-all"
+        run: |
+          set -eux
+          WINE=$(command -v wine || command -v wine64)
+          D="$PWD/t"
+          mkdir -p "$D/in" "$D/out"
+          # exe 全放同一层：models/ 和 ffmpeg.exe 必须挨着 exe
+          # （见 core/src/lib.rs 的 ffmpeg_path 和 builtin_sep.rs 的 model_dir）
+          find win -type f -name '*.exe' -exec cp {} "$D/" \;
+          cp -r "$(find lin -type d -name models | head -1)" "$D/models"
+          ls -la "$D" "$D/models"
+          # 造两个 4 秒立体声 WAV：用 Linux 侧静态 ffmpeg，不受 Wine 影响
+          LFF=$(find lin -type f -name dist-ffmpeg | head -1)
+          chmod +x "$LFF"
+          "$LFF" -hide_banner -loglevel error -y \
+            -f lavfi -i "sine=frequency=440:duration=4" -ac 2 -ar 44100 "$D/in/a.wav"
+          "$LFF" -hide_banner -loglevel error -y \
+            -f lavfi -i "sine=frequency=330:duration=4" -ac 2 -ar 44100 "$D/in/b.wav"
+          cd "$D"
+          xvfb-run -a "$WINE" upmix-core.exe --batch in --mode auto --outdir out \
+            > log.txt 2>&1 || { cat log.txt; exit 1; }
+          cat log.txt
+          N=$(grep -c '^upmix-engine-load$' log.txt || true)
+          echo "Wine 下引擎实际加载次数 = $N（期望 1）"
+          test "$N" -eq 1
+          ls -la out
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
+    needs: [linux, windows, wine-auto-batch]
     runs-on: ubuntu-latest
     permissions:
       contents: write
