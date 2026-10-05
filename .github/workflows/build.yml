@@ -159,26 +159,26 @@ jobs:
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           # 只装 wine64 会得到 /usr/lib/wine/wine64，没有 /usr/bin/wine；
-          # /usr/bin/wine 是 `wine` 这个包提供的（它才是入口）。
+          # 而缺了 wine32 的话 prefix 初始化会失败（syswow64\rundll32.exe 打不开）。
           sudo apt-get install -y --no-install-recommends xvfb wine
+          sudo apt-get install -y --no-install-recommends wine32 || true
           wine --version
+          wineboot -u || true
 
       - name: Wine 下跑自动分离批量（2 个文件）
         env:
           UPMIX_TRACE_ENGINE: "1"
           WINEDEBUG: "-all"
         run: |
-          set -eux
+          set -ux
           WINE=$(command -v wine || command -v wine64 || echo /usr/lib/wine/wine64)
-          test -x "$WINE" || { echo "找不到 wine 可执行文件"; ls -la /usr/bin/wine* /usr/lib/wine/ || true; exit 1; }
-          "$WINE" --version
+          test -x "$WINE"
           D="$PWD/t"
           mkdir -p "$D/in" "$D/out"
           # exe 全放同一层：models/ 和 ffmpeg.exe 必须挨着 exe
           # （见 core/src/lib.rs 的 ffmpeg_path 和 builtin_sep.rs 的 model_dir）
           find win -type f -name '*.exe' -exec cp {} "$D/" \;
           cp -r "$(find lin -type d -name models | head -1)" "$D/models"
-          ls -la "$D" "$D/models"
           # 造两个 4 秒立体声 WAV：用 Linux 侧静态 ffmpeg，不受 Wine 影响
           LFF=$(find lin -type f -name dist-ffmpeg | head -1)
           chmod +x "$LFF"
@@ -187,8 +187,14 @@ jobs:
           "$LFF" -hide_banner -loglevel error -y \
             -f lavfi -i "sine=frequency=330:duration=4" -ac 2 -ar 44100 "$D/in/b.wav"
           cd "$D"
+          # 先单独探一次：exe 在 Wine 里到底起不起得来（起不来就把原因打出来）
+          xvfb-run -a "$WINE" upmix-core.exe --help > help.txt 2>&1
+          echo "help exit=$?"
+          cat help.txt
+          echo "=== 正式跑批量 ==="
+          set -e
           xvfb-run -a "$WINE" upmix-core.exe --batch in --mode auto --outdir out \
-            > log.txt 2>&1 || { cat log.txt; exit 1; }
+            > log.txt 2>&1 || { echo "--- log.txt ---"; cat log.txt; exit 1; }
           cat log.txt
           N=$(grep -c '^upmix-engine-load$' log.txt || true)
           echo "Wine 下引擎实际加载次数 = $N（期望 1）"
