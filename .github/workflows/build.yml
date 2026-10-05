@@ -35,14 +35,17 @@ jobs:
         # 2009 年后的 CPU 都支持，且不含 AVX2。
         env:
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
-        run: cargo build --release
+        # --locked：仓库里的 Cargo.lock 必须和 Cargo.toml 一致，否则直接失败。
+        # 以前不加，cargo 会在 CI 里悄悄重算一遍依赖，结果提交上去的锁文件
+        # 长期是残缺的（缺 ort/stem-splitter 整棵树）也没人发现。
+        run: cargo build --release --locked
 
       - name: 跑单元测试（元数据搬运/RIFF/ID3 这类纯逻辑，不需要模型）
         # 以前 CI 只 build 不 test，改坏了没人拦得住。这里补上。
         # 只测 upmix-core：GUI/TUI 的测试基本是 UI，且会拖长构建。
         env:
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
-        run: cargo test --release -p upmix-core
+        run: cargo test --release --locked -p upmix-core
 
       - name: clippy（只报告不拦，用来找潜在 bug）
         # 人为 review 会漏，让编译器帮忙扫一遍。continue-on-error：样式类告警
@@ -51,9 +54,9 @@ jobs:
         env:
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
         run: |
-          cargo clippy --release -p upmix-core --all-targets -- -W clippy::all 2>&1 | tail -300
+          cargo clippy --release --locked -p upmix-core --all-targets -- -W clippy::all 2>&1 | tail -300
           echo "=== 只看正确性/可疑类 ==="
-          cargo clippy --release -p upmix-core --all-targets -- -W clippy::all 2>&1 \
+          cargo clippy --release --locked -p upmix-core --all-targets -- -W clippy::all 2>&1 \
             | grep -E "^warning|^error" | sort | uniq -c | sort -rn | head -40
 
       - name: 取静态 ffmpeg（随包分发，用户不用自己装）
