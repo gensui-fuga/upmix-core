@@ -163,16 +163,21 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb wine
           sudo apt-get install -y --no-install-recommends wine32 || true
           wine --version
-          wineboot -u || true
+          # prefix 必须在 X 下建：裸跑 wineboot 会报
+          # "Make sure that your X server is running and that $DISPLAY is set correctly"
+          xvfb-run -a wineboot -u || true
+          xvfb-run -a wine cmd /c echo wine-self-test-ok || true
 
       - name: Wine 下跑自动分离批量（2 个文件）
         env:
           UPMIX_TRACE_ENGINE: "1"
           WINEDEBUG: "-all"
         run: |
+          # 注意：GitHub Actions 用 `bash -e` 跑这段，`set -ux` 关不掉那个 -e。
+          # 上一轮就是探针退出 53 直接把步骤带走了，后面的诊断一句没跑。
+          # 所以探针阶段显式 `set +e`。
           set -ux
           WINE=$(command -v wine || command -v wine64 || echo /usr/lib/wine/wine64)
-          test -x "$WINE"
           D="$PWD/t"
           mkdir -p "$D/in" "$D/out"
           # exe 全放同一层：models/ 和 ffmpeg.exe 必须挨着 exe
@@ -187,19 +192,27 @@ jobs:
           "$LFF" -hide_banner -loglevel error -y \
             -f lavfi -i "sine=frequency=330:duration=4" -ac 2 -ar 44100 "$D/in/b.wav"
           cd "$D"
-          # 先单独探一次：exe 在 Wine 里到底起不起得来（起不来就把原因打出来）
-          xvfb-run -a "$WINE" upmix-core.exe --help > help.txt 2>&1
-          echo "help exit=$?"
-          cat help.txt
+
+          set +e
+          echo "=== 探针1：Wine 自身能不能跑 Windows 程序 ==="
+          xvfb-run -a "$WINE" cmd /c echo wine-self-test-ok > p1.txt 2>&1
+          echo "p1 exit=$?"
+          tail -20 p1.txt
+          echo "=== 探针2：upmix-core.exe 能不能起来 ==="
+          xvfb-run -a "$WINE" upmix-core.exe --help > p2.txt 2>&1
+          P2=$?
+          echo "p2 exit=$P2"
+          tail -40 p2.txt
           echo "=== 正式跑批量 ==="
-          set -e
-          xvfb-run -a "$WINE" upmix-core.exe --batch in --mode auto --outdir out \
-            > log.txt 2>&1 || { echo "--- log.txt ---"; cat log.txt; exit 1; }
-          cat log.txt
+          xvfb-run -a "$WINE" upmix-core.exe --batch in --mode auto --outdir out > log.txt 2>&1
+          R=$?
+          echo "batch exit=$R"
+          tail -60 log.txt
           N=$(grep -c '^upmix-engine-load$' log.txt || true)
           echo "Wine 下引擎实际加载次数 = $N（期望 1）"
+          ls -la out 2>/dev/null || true
+          test "$R" -eq 0
           test "$N" -eq 1
-          ls -la out
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
