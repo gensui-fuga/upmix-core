@@ -194,12 +194,14 @@ jobs:
           cd "$D"
 
           set +e
+          echo "=== exe 的 DLL 依赖（objdump 直接读 PE，不靠运行）==="
+          objdump -p upmix-core.exe 2>/dev/null | grep -i "DLL Name" || true
           echo "=== 探针1：Wine 自身能不能跑 Windows 程序 ==="
           xvfb-run -a "$WINE" cmd /c echo wine-self-test-ok > p1.txt 2>&1
           echo "p1 exit=$?"
           tail -20 p1.txt
-          echo "=== 探针2：upmix-core.exe 能不能起来 ==="
-          xvfb-run -a "$WINE" upmix-core.exe --help > p2.txt 2>&1
+          echo "=== 探针2：upmix-core.exe 能不能起来（不静音 Wine 的报错）==="
+          WINEDEBUG=err+all xvfb-run -a "$WINE" upmix-core.exe --help > p2.txt 2>&1
           P2=$?
           echo "p2 exit=$P2"
           tail -40 p2.txt
