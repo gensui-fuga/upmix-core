@@ -158,10 +158,10 @@ jobs:
           set -eux
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends xvfb wine64 \
-            || sudo apt-get install -y --no-install-recommends xvfb wine
-          (command -v wine || command -v wine64)
-          (wine --version || wine64 --version)
+          # 只装 wine64 会得到 /usr/lib/wine/wine64，没有 /usr/bin/wine；
+          # /usr/bin/wine 是 `wine` 这个包提供的（它才是入口）。
+          sudo apt-get install -y --no-install-recommends xvfb wine
+          wine --version
 
       - name: Wine 下跑自动分离批量（2 个文件）
         env:
@@ -169,7 +169,9 @@ jobs:
           WINEDEBUG: "-all"
         run: |
           set -eux
-          WINE=$(command -v wine || command -v wine64)
+          WINE=$(command -v wine || command -v wine64 || echo /usr/lib/wine/wine64)
+          test -x "$WINE" || { echo "找不到 wine 可执行文件"; ls -la /usr/bin/wine* /usr/lib/wine/ || true; exit 1; }
+          "$WINE" --version
           D="$PWD/t"
           mkdir -p "$D/in" "$D/out"
           # exe 全放同一层：models/ 和 ffmpeg.exe 必须挨着 exe
