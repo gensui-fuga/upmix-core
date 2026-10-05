@@ -61,9 +61,28 @@ impl Biquad {
     }
 
     /// First-order all-pass at `f` (Hz). Useful for phase decorrelation.
+    ///
+    /// **频率必须钳在 Nyquist 以下，否则整个滤波器会发散。** 全通环节
+    /// `H(z) = (a + z^-1)/(1 + a z^-1)` 的极点在 `z = -a`，要稳定就得 `|a| < 1`，
+    /// 也就是 `tan(πf/sr) > 0`，即 `f < sr/2`。`f` 一旦越过 Nyquist，`tan` 转负
+    /// 且绝对值大于 1，`a = (t-1)/(t+1)` 随之 `|a| > 1`，极点跑到单位圆外，
+    /// 输出按指数发散到 ±inf。
+    ///
+    /// 这不是理论问题：环绕去相关链的右声道最高一级是 9127 Hz，任何
+    /// 采样率低于 18254 Hz 的输入（8k / 11.025k / 12k / 16k / 17.64k）都会踩中。
+    /// 实测 16 kHz 输入下 BR 冲到 -inf，再经默认开启的 `downmix_compat` 变成
+    /// `inf/inf = NaN` 的全局增益，六个声道一起变 NaN，最后在 PCM 量化时被
+    /// 饱和成 0 —— **整份输出是纯静音，而且不报任何错**。
     pub fn allpass1(sample_rate: f64, f: f64) -> Self {
+        // 留出余量：f/sr 上限取 0.45，此时 tan(0.45π) ≈ 6.3，a ≈ 0.73，稳定。
+        let f = if sample_rate > 0.0 {
+            f.max(0.0).min(sample_rate * 0.45)
+        } else {
+            0.0
+        };
         let t = (PI * f / sample_rate).tan();
         let a = (t - 1.0) / (t + 1.0);
+        debug_assert!(a.abs() < 1.0, "allpass1 不稳定：a={a}, f={f}, sr={sample_rate}");
         // H(z) = (a + z^-1) / (1 + a z^-1)
         Self::new(a, 1.0, 0.0, a, 0.0)
     }
@@ -231,5 +250,38 @@ mod tests {
         let a = rms(&sig[warm..]);
         let b = rms(&out[warm..]);
         assert!((a - b).abs() / a < 0.01, "allpass changed magnitude: {a} vs {b}");
+    }
+
+    /// 回归：低采样率下环绕去相关链必须保持稳定。
+    ///
+    /// 旧代码 `allpass1` 直接用 `tan(πf/sr)`，而右声道链最高一级是 9127 Hz。
+    /// 采样率低于 18254 Hz 时 f 越过 Nyquist，`|a| > 1`，极点跑到单位圆外，
+    /// 输出指数发散到 ±inf；再经默认开启的 `downmix_compat` 变成 `inf/inf`
+    /// 的 NaN 全局增益，六个声道一起 NaN，最后在 PCM 量化时饱和成 0 ——
+    /// 整份输出是纯静音，而且不报任何错。
+    #[test]
+    fn allpass_chain_stays_stable_below_nyquist() {
+        // 真实的左右去相关链，见 upmix/mod.rs
+        let left = [257.0, 1153.0, 3307.0, 7717.0];
+        let right = [331.0, 1427.0, 4129.0, 9127.0];
+        for sr in [
+            8000.0, 11025.0, 12000.0, 16000.0, 17640.0, 22050.0, 32000.0, 44100.0, 48000.0,
+            96000.0, 192000.0,
+        ] {
+            for freqs in [&left[..], &right[..]] {
+                let mut chain = AllpassChain::new(sr, freqs);
+                let n = (sr / 2.0) as usize;
+                let mut buf: Vec<f64> = (0..n)
+                    .map(|i| (2.0 * PI * 1000.0 * i as f64 / sr).sin())
+                    .collect();
+                chain.process_block(&mut buf);
+                let peak = buf.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                assert!(
+                    peak.is_finite(),
+                    "sr={sr} freqs={freqs:?}: 输出出现 inf/NaN（滤波器发散）"
+                );
+                assert!(peak < 10.0, "sr={sr} freqs={freqs:?}: 输出发散，峰值 {peak}");
+            }
+        }
     }
 }

@@ -56,8 +56,12 @@ tag()    { "$FFPROBE" -v error -show_entries format_tags="$1" -of default=nw=1:n
 hasvid() { "$FFPROBE" -v error -select_streams v -show_entries stream=codec_type   -of default=nw=1:nk=1 "$1"; }
 # 把第 N 个声道单独抽出来量平均电平（dB）。5.1 顺序 FL FR FC LFE BL BR → LFE 是 c3。
 chan_db() {
-  "$FFMPEG" -hide_banner -nostats -i "$1" -af "pan=mono|c0=c$2,volumedetect" -f null - 2>&1 \
-    | sed -n 's/.*mean_volume: \(-\{0,1\}[0-9.]*\) dB.*/\1/p' | head -1
+  local v
+  v=$("$FFMPEG" -hide_banner -nostats -i "$1" -af "pan=mono|c0=c$2,volumedetect" -f null - 2>&1 \
+    | sed -n 's/.*mean_volume: \(-\{0,1\}[0-9.]*\) dB.*/\1/p' | head -1)
+  # 纯静音时 volumedetect 报 -inf，上面这条解析不出来。必须回落到一个极低值，
+  # 否则 awk 把空串当 0，"静音"反而会通过 gt 检查——测试就成了摆设。
+  echo "${v:--999}"
 }
 
 # =====================================================================
@@ -238,6 +242,28 @@ else
 fi
 if [ -s mono.log ]; then ok "有可读的报错信息"; else bad "报错信息为空"; fi
 echo "     $(head -2 mono.log | tr '\n' ' ')"
+
+# =====================================================================
+section "11b. 低采样率不能因为去相关链发散而变成整份静音"
+# =====================================================================
+# 旧代码 allpass1 直接用 tan(πf/sr)，而右环绕去相关链最高一级是 9127 Hz。
+# 采样率低于 18254 Hz 时 f 越过 Nyquist → |a|>1 → 极点出单位圆 → 输出发散到
+# ±inf → 经默认开启的 downmix_compat 变 inf/inf=NaN → PCM 量化饱和成 0：
+# 整份输出是纯静音，而且不报任何错。8k/11.025k/12k/16k/17.64k 全部中招。
+for SR in 8000 16000; do
+  "$FFMPEG" -hide_banner -loglevel error -y \
+    -f lavfi -i "sine=frequency=440:duration=2:sample_rate=$SR" \
+    -f lavfi -i "sine=frequency=300:duration=2:sample_rate=$SR" \
+    -filter_complex "[0:a][1:a]amerge=inputs=2[a]" -map "[a]" -ac 2 "low$SR.flac"
+  mkdir -p "o$SR"
+  "$BIN" "low$SR.flac" --mode fast --outdir "o$SR" > "low$SR.log" 2>&1
+  O="o$SR/low${SR}_5.1.flac"
+  if [ -f "$O" ]; then ok "${SR}Hz 输出存在"; else bad "${SR}Hz 输出不存在"; fi
+  eq "${SR}Hz 输出 6 声道" "6" "$(chans "$O")"
+  gt "${SR}Hz 左前不是静音（FL > -45dB）"     "$(chan_db "$O" 0)" "-45"
+  gt "${SR}Hz 右后不是静音（BR > -45dB）"     "$(chan_db "$O" 5)" "-45"
+  gt "${SR}Hz 中置不是静音（FC > -45dB）"     "$(chan_db "$O" 2)" "-45"
+done
 
 # =====================================================================
 section "12. 自动分离模式（Demucs/ONNX）端到端"
