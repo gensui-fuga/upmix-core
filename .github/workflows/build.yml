@@ -109,6 +109,18 @@ jobs:
           test -f smoke/out/a_5.1.flac
           test -f smoke/out/b_5.1.flac
 
+      - name: 把 ffmpeg 摆到二进制旁边（复刻发行包布局）
+        # core 的 ffmpeg_path() 是「先找 current_exe 旁边的，找不到再回落 PATH」。
+        # 发行包里 ffmpeg 就躺在二进制旁边；CI 里如果只在仓库根目录放一份，
+        # 测的就不是用户实际拿到的那个布局——MP3 解码和 WAV 标签搬运都依赖
+        # 这个查找结果，布局不对会测出一堆假失败。
+        run: |
+          set -eux
+          cp dist-ffmpeg target/release/ffmpeg
+          cp dist-ffprobe target/release/ffprobe
+          chmod +x target/release/ffmpeg target/release/ffprobe
+          test -x target/release/ffmpeg
+
       - name: 备好内置分离模型（auto 模式端到端要用）
         # 从源码编译出来的二进制旁边没有 models/，auto 模式的端到端会直接报
         # 「找不到 models/ 目录」。发行包自带它，CI 里得先自己拉一份。
