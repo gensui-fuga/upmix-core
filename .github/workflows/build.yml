@@ -73,6 +73,12 @@ jobs:
           cp "$FF" dist-ffmpeg
           chmod +x dist-ffmpeg
           ./dist-ffmpeg -version | head -1
+          # ffprobe 不进发行包，只给端到端测试验输出用（声道数/采样率/标签/封面）。
+          FFP=$(find . -maxdepth 3 -type f -name ffprobe | head -1)
+          test -n "$FFP"
+          cp "$FFP" dist-ffprobe
+          chmod +x dist-ffprobe
+          ./dist-ffprobe -version | head -1
 
       - name: 预取模型（打进包，用户首次运行就不用联网）
         run: |
@@ -102,6 +108,18 @@ jobs:
           test "$N" -eq 1
           test -f smoke/out/a_5.1.flac
           test -f smoke/out/b_5.1.flac
+
+      - name: 端到端功能测试（真二进制 + 真音频）
+        # 单元测试只覆盖纯逻辑，而用户踩到的坑全在「真二进制 + 真文件」这条路上：
+        # 封面歌手歌词丢失、低音没声音、批量闪退。见 ci/e2e.sh 的注释。
+        env:
+          BIN: target/release/upmix-core
+          FFMPEG: ./dist-ffmpeg
+          FFPROBE: ./dist-ffprobe
+        run: |
+          set -eux
+          chmod +x ci/e2e.sh
+          bash ci/e2e.sh
 
       - uses: actions/upload-artifact@v4
         with:
