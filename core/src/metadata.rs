@@ -559,15 +559,43 @@ pub fn inject_into_wav(path: &Path, source: Option<&Path>) -> Result<()> {
         }
     }
 
+    // 注意：不能用 append(true)。O_APPEND 下 seek 会被内核忽略，写完标签就再也
+    // 回不到文件头去改 RIFF 的长度字段了。这里用读写方式打开，自己 seek 到末尾追加。
     let mut f = std::fs::OpenOptions::new()
-        .append(true)
+        .read(true)
+        .write(true)
         .open(path)
-        .with_context(|| format!("opening {} for append", path.display()))?;
-    use std::io::Write;
+        .with_context(|| format!("opening {} for appending tags", path.display()))?;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    // 只有标准 RIFF/WAVE 的长度字段在偏移 4（RF64 / WAVE64 不是这个布局）。
+    let mut magic = [0u8; 4];
+    let is_riff = f.read_exact(&mut magic).is_ok() && &magic == b"RIFF";
+
+    f.seek(SeekFrom::End(0)).context("seeking to end of WAV")?;
     if need_pad {
         f.write_all(&[0]).context("padding WAV data chunk")?;
     }
     f.write_all(&extra).context("appending WAV tags")?;
+
+    // RIFF 头里的长度字段 = 文件总长 - 8。追加了标签却不改它，文件就是畸形的：
+    // 按规范走的解析器（不一路扫到 EOF 的那种）会忽略追加在后面的标签，等于白写。
+    // hound 写完这个字段就不管了，只能我们自己补上。
+    let total = f.stream_position().context("querying WAV length")?;
+    if is_riff && total > 8 {
+        let riff_size = total - 8;
+        if riff_size <= u32::MAX as u64 {
+            f.seek(SeekFrom::Start(4))
+                .context("seeking to RIFF size field")?;
+            f.write_all(&(riff_size as u32).to_le_bytes())
+                .context("updating RIFF size field")?;
+        } else {
+            eprintln!(
+                "warning: {} 超过 4 GiB，RIFF 头里的长度字段表示不了，未更新（该改用 RF64）",
+                path.display()
+            );
+        }
+    }
     f.flush().ok();
     Ok(())
 }
@@ -910,5 +938,91 @@ mod tests {
         );
         let tags = tags_from_blocks(&[(T_VORBIS_COMMENT, vc)]);
         assert_eq!(tags, vec!["title=T".to_string()]);
+    }
+
+    /// 手搓一个只有元数据块、没有音频帧的 FLAC。
+    ///
+    /// `read_flac_blocks` 是纯字节解析（不经过 claxon），所以这样造出来的文件
+    /// 足够当“带标签的源”用，而且不依赖 ffmpeg 或 flac CLI。
+    fn fake_flac(tags: &[&str]) -> Vec<u8> {
+        let vc = build_vorbis(
+            "test",
+            &tags.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        );
+        let mut out = Vec::new();
+        out.extend_from_slice(b"fLaC");
+        // STREAMINFO：类型 0，固定 34 字节，内容无所谓（read_flac_blocks 会跳过）
+        out.push(0x00);
+        out.extend_from_slice(&[0, 0, 34]);
+        out.extend_from_slice(&[0u8; 34]);
+        // VORBIS_COMMENT：类型 4，置 last 位
+        out.push(0x80 | 4);
+        out.extend_from_slice(&[
+            (vc.len() >> 16) as u8,
+            (vc.len() >> 8) as u8,
+            vc.len() as u8,
+        ]);
+        out.extend_from_slice(&vc);
+        out
+    }
+
+    /// 手搓一个 fmt + data 的最小 WAV（data 长度可以是奇数，用来验补齐字节）。
+    fn fake_wav(data_len: usize) -> Vec<u8> {
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        body.extend_from_slice(&6u16.to_le_bytes()); // 6 声道
+        body.extend_from_slice(&48000u32.to_le_bytes());
+        body.extend_from_slice(&(48000u32 * 6 * 2).to_le_bytes());
+        body.extend_from_slice(&(6u16 * 2).to_le_bytes());
+        body.extend_from_slice(&16u16.to_le_bytes());
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&(data_len as u32).to_le_bytes());
+        body.extend_from_slice(&vec![0u8; data_len]);
+        let mut wav: Vec<u8> = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&body);
+        wav
+    }
+
+    /// 回归测试：往 WAV 追加标签后，RIFF 头里的长度字段必须跟着更新。
+    ///
+    /// 之前是用 `append(true)` 打开文件追加的，而 O_APPEND 下 seek 会被内核忽略，
+    /// 于是长度字段永远停在 hound 写完时的值。按规范走的解析器据此认为文件在标签
+    /// 之前就结束了——追加的标签等于白写。奇数长度的 data 块还要多补一个字节。
+    #[test]
+    fn wav_riff_size_follows_appended_tags() {
+        for data_len in [100usize, 101] {
+            let src = unique_temp("riffsize-src", "flac");
+            std::fs::write(&src, fake_flac(&["TITLE=Song", "ARTIST=Someone"])).unwrap();
+
+            let out = unique_temp("riffsize-out", "wav");
+            std::fs::write(&out, fake_wav(data_len)).unwrap();
+            let before = std::fs::read(&out).unwrap().len();
+
+            inject_into_wav(&out, Some(&src)).unwrap();
+
+            let d = std::fs::read(&out).unwrap();
+            assert!(d.len() > before, "data_len={data_len}：标签根本没被追加进去");
+            let riff_size = u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as usize;
+            assert_eq!(
+                riff_size,
+                d.len() - 8,
+                "data_len={data_len}：追加标签后 RIFF 长度字段没更新（声明 {riff_size}，实际 {}）",
+                d.len() - 8
+            );
+            // 追加的 LIST 必须落在声明的范围之内，否则解析器看不见它。
+            let list_at = d.windows(4).position(|w| w == b"LIST").expect("没有 LIST 块");
+            assert!(
+                list_at < riff_size + 8,
+                "data_len={data_len}：LIST 块（偏移 {list_at}）落在 RIFF 声明范围之外"
+            );
+
+            let _ = std::fs::remove_file(&src);
+            let _ = std::fs::remove_file(&out);
+        }
     }
 }
