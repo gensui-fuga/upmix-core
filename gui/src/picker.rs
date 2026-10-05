@@ -111,7 +111,7 @@ impl Picker {
             let p = e.path();
             if p.is_dir() {
                 dirs.push(p);
-            } else if !self.dir_mode && upmix_core::is_input_path(&p) {
+            } else if !self.dir_mode && upmix_core::fileio::is_input_path(&p) {
                 files.push(p);
             }
         }
