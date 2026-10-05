@@ -168,6 +168,31 @@ jobs:
           xvfb-run -a wineboot -u || true
           xvfb-run -a wine cmd /c echo wine-self-test-ok || true
 
+      - name: 造 directml.dll 桩（只为让 Wine 能加载 exe）
+        # objdump -p 实测：upmix-core.exe 的**静态**导入表里有
+        #   directml.dll!DMLCreateDevice1（就这一个符号）
+        #   d3d12.dll!D3D12CreateDevice / D3D12SerializeVersionedRootSignature
+        #   dxgi.dll!CreateDXGIFactory2
+        # 而且这个 PE 根本没有延迟导入段，所以 Windows 加载器在进程启动时就要
+        # 解析它们。Wine 自带 d3d12/dxgi，但没有 DirectML.dll，于是 exe 连启动
+        # 都做不到（实测退出码 53，无任何输出）。
+        # 我们关掉了 directml feature（Cargo.toml 里 default-features = false），
+        # 从来不激活 DirectML EP，所以这个桩不会被真正调用——它只是让加载器
+        # 过这一关。**桩不进发行包，只在这个测试里用。**
+        run: |
+          set -eux
+          sudo apt-get install -y --no-install-recommends mingw-w64
+          cat > stub.c <<'EOF'
+          #include <windows.h>
+          HRESULT WINAPI DMLCreateDevice1(void *a, DWORD b, DWORD c, void *d, void *e) {
+              (void)a; (void)b; (void)c; (void)d; (void)e;
+              return (HRESULT)0x80004005L;
+          }
+          EOF
+          x86_64-w64-mingw32-gcc -shared -O2 -o directml.dll stub.c
+          objdump -p directml.dll > dml.txt
+          grep -i DMLCreateDevice1 dml.txt || { echo "桩没导出 DMLCreateDevice1"; tail -40 dml.txt; exit 1; }
+
       - name: Wine 下跑自动分离批量（2 个文件）
         env:
           UPMIX_TRACE_ENGINE: "1"
@@ -184,6 +209,8 @@ jobs:
           # （见 core/src/lib.rs 的 ffmpeg_path 和 builtin_sep.rs 的 model_dir）
           find win -type f -name '*.exe' -exec cp {} "$D/" \;
           cp -r "$(find lin -type d -name models | head -1)" "$D/models"
+          # exe 的静态导入表要 directml.dll，Wine 没有，放桩在 exe 同目录
+          cp directml.dll "$D/"
           # 造两个 4 秒立体声 WAV：用 Linux 侧静态 ffmpeg，不受 Wine 影响
           LFF=$(find lin -type f -name dist-ffmpeg | head -1)
           chmod +x "$LFF"
