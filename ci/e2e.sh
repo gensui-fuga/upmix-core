@@ -121,6 +121,7 @@ eq "素材 stereo.flac 带 artist"  "测试歌手"         "$(tag artist stereo.
 eq "素材 stereo.flac 带 lyrics"  "这是测试歌词内容" "$(tag lyrics stereo.flac)"
 eq "素材 cover.flac 带封面"      "video"            "$(hasvid cover.flac)"
 eq "素材 song.mp3 带歌词"        "MP3歌词内容"      "$(tag lyrics song.mp3)"
+eq "素材 wav24.wav 带 title"     "WAV标题"          "$(tag title  wav24.wav)"
 eq "素材 mono.wav 是单声道"      "1"                "$(chans mono.wav)"
 eq "素材 hi96.wav 是 96k"        "96000"            "$(srate hi96.wav)"
 
@@ -149,7 +150,13 @@ eq "输出仍有封面" "video" "$(hasvid o2/cover_5.1.flac)"
 section "3. MP3 歌词（朋友报过「歌词没了」，就是这条路）"
 # =====================================================================
 mkdir -p o3
-"$BIN" song.mp3 --mode fast --outdir o3 >/dev/null 2>&1
+"$BIN" song.mp3 --mode fast --outdir o3 > mp3.log 2>&1
+if [ -f o3/song_5.1.flac ]; then
+  ok "MP3 有产出"
+else
+  bad "MP3 没有产出任何文件——不是标签丢失，是整条路失败了"
+  echo "     mp3 日志：$(tr '\n' ' ' < mp3.log | head -c 400)"
+fi
 eq "输出歌词保留" "MP3歌词内容" "$(tag lyrics o3/song_5.1.flac)"
 
 # =====================================================================
@@ -201,14 +208,25 @@ eq "96k 保持" "96000" "$(srate o8/hi96_5.1.flac)"
 section "9. LFE 真的有声音（朋友报过「低音没声音」）"
 # =====================================================================
 mkdir -p o9
-"$BIN" low40.flac --mode fast --outdir o9 >/dev/null 2>&1
+"$BIN" low40.flac --mode fast --outdir o9 > low40.log 2>&1
 L=o9/low40_5.1.flac
 eq "输出 6 声道" "6" "$(chans "$L")"
+# 拿输入电平当基准（满幅正弦 RMS ≈ -3dBFS），才能判断衰减是设计还是 bug。
+IN_FL=$(chan_db low40.flac 0)
 LFE=$(chan_db "$L" 3)
 FL=$(chan_db "$L" 0)
-echo "     LFE=$LFE dB   FL=$FL dB   LFE-FL=$(awk -v a="$LFE" -v b="$FL" 'BEGIN{printf "%.2f", a-b}') dB"
+FL_D=$(awk -v a="$FL" -v b="$IN_FL" 'BEGIN{printf "%.2f", a-b}')
+echo "     输入 FL=$IN_FL dB   输出 FL=$FL dB（Δ${FL_D} dB）   LFE=$LFE dB"
+printf '     六声道电平：'
+for C in 0 1 2 3 4 5; do
+  printf '%s=%s ' "$(echo FL FR FC LFE BL BR | cut -d' ' -f$((C+1)))" "$(chan_db "$L" "$C")"
+done
+echo
 gt "LFE 不是静音（> -45dB）" "$LFE" "-45"
-gt "主声道正常（> -20dB）"   "$FL"  "-20"
+gt "FL 不是静音（> -45dB）"  "$FL"  "-45"
+# 整体电平不能被无端压掉。旧行为实测 FL 掉到 -24.9dB（输入 -3dB），
+# 也就是 22dB 的衰减——那正是「低音没声音」的听感来源。
+gt "主声道没有整体衰减过头（Δ > -12dB）" "$FL_D" "-12"
 # 回归锁：默认 LFE 是 -3dB/150Hz。旧版是 -6dB/120Hz，对 40Hz 素材会低约 3dB，
 # 所以这个窗口能把「改回旧参数」和「LFE 被衰减过头」都抓住。
 within "LFE 相对主声道在 -3dB 附近（旧版 -6dB 会被抓）" \
