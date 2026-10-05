@@ -47,7 +47,14 @@ fn flac_cli_available() -> bool {
 /// Encode through the reference `flac` CLI (raw PCM on stdin).
 fn write_cli(path: &Path, buf: &AudioBuffer) -> Result<()> {
     let bits = buf.bits_per_sample;
-    let bps = (bits / 8) as usize;
+    // 原始 PCM 的样本宽度是**整字节向上取整**（flac 的原始读取器就是这么算的），
+    // 所以写 div_ceil 而不是 bits/8。
+    //
+    // 注意：flac CLI 本身只接受 `--bps` 8/16/24/32，其他位深（12/20bit）它会直接
+    // 报 “invalid bits per sample” 退出，由 write() 回退到内置编码器——所以对上面
+    // 那四个值来说，div_ceil 和 bits/8 是等价的。写成 div_ceil 只是为了不在这个
+    // 位置留一个“只有碰巧才对”的表达式。
+    let bps = (bits as usize).div_ceil(8);
     let channels = buf.num_channels();
     let mut child = Command::new("flac")
         .args([
@@ -157,6 +164,51 @@ fn write_enc(path: &Path, buf: &AudioBuffer) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 造一个指定位深的双声道测试信号（样本值落在该位深的有效范围内）。
+    fn ramp(bits: u32, n: usize, mul: f64) -> Vec<i32> {
+        let s = AudioBuffer::scale(bits);
+        (0..n)
+            .map(|i| ((i as f64 * mul).sin() * s * 0.7) as i32)
+            .collect()
+    }
+
+    fn temp(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("upmix_flac_{tag}_{}_{nanos}.flac", std::process::id()))
+    }
+
+    /// 12bit / 20bit 源：flac CLI 只接受 `--bps` 8/16/24/32，`--bps 12` 会直接以
+    /// “invalid bits per sample” 退出（CI 实测）。所以 `write()` 必须干净地回退到
+    /// 内置编码器，把文件完整写出来，而不是留个半成品。
+    ///
+    /// 这个用例同时覆盖两条路：装了 flac 时走「CLI 报错 → 回退」，没装时直接走
+    /// 内置编码器。以前这条回退路径一次都没被跑过。
+    #[test]
+    fn write_falls_back_to_builtin_for_12bit_and_20bit() {
+        for bits in [12u32, 20u32] {
+            let n = 4000;
+            let buf = AudioBuffer::from_i32_planar(
+                vec![ramp(bits, n, 0.05), ramp(bits, n, 0.07)],
+                48000,
+                bits,
+            );
+            let path = temp(&format!("fallback{bits}"));
+            write(&path, &buf, None).unwrap();
+            let back = read(&path).unwrap();
+            assert_eq!(back.bits_per_sample, bits, "{bits}bit 的位深没保住");
+            assert_eq!(back.num_frames(), n, "{bits}bit 的帧数不对");
+            assert_eq!(
+                back.to_i32_interleaved(bits),
+                buf.to_i32_interleaved(bits),
+                "{bits}bit 的样本对不上——回退路径写出了坏文件"
+            );
+            let _ = std::fs::remove_file(path);
+        }
+    }
 
     #[test]
     fn flac_roundtrip_16bit_stereo() {
