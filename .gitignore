@@ -11,3 +11,7 @@ keystore.jks
 
 # release artifacts
 /dist
+
+# 本地试听产物：几百 MB 的 flac，进了仓库会直接顶到 GitHub 100MB 单文件上限
+/output
+/smoke
