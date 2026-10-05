@@ -389,12 +389,16 @@ impl App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui.button("选择文件…").clicked() {
+                    // sort() 会打乱下标：不重算的话 selected 会指到另一首歌上，
+                    // 用户以为选的是 A，点开始转出来的是 B。
+                    let keep = self.selected.and_then(|i| self.files.get(i).cloned());
                     for p in pick_audio_files() {
                         if !self.files.iter().any(|f| f == &p) {
                             self.files.push(p);
                         }
                     }
                     self.files.sort();
+                    self.selected = keep.and_then(|p| self.files.iter().position(|f| *f == p));
                 }
                 if ui.button("选择文件夹…").clicked() {
                     if let Some(d) = pick_music_dir() {
@@ -1314,7 +1318,13 @@ fn collect(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
             }
         } else if let Some(ext) = p.extension().and_then(|x| x.to_str()) {
             if upmix_core::fileio::is_input_ext(ext) {
-                out.push(p);
+                // 别把自己的产物当输入。CLI 的批量一直有这道过滤，GUI 漏了：
+                // 转完一轮 *_5.1.flac 就躺在源目录里，再点一次批量它们全被扫进来，
+                // 每跑一轮文件数翻一倍，批量越跑越像"卡死/闪退"。
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if !stem.ends_with("_5.1") {
+                    out.push(p);
+                }
             }
         }
     }
