@@ -44,6 +44,18 @@ jobs:
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
         run: cargo test --release -p upmix-core
 
+      - name: clippy（只报告不拦，用来找潜在 bug）
+        # 人为 review 会漏，让编译器帮忙扫一遍。continue-on-error：样式类告警
+        # 不该拦住发版，但正确性类的必须能在日志里看见。
+        continue-on-error: true
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v2"
+        run: |
+          cargo clippy --release -p upmix-core --all-targets -- -W clippy::all 2>&1 | tail -300
+          echo "=== 只看正确性/可疑类 ==="
+          cargo clippy --release -p upmix-core --all-targets -- -W clippy::all 2>&1 \
+            | grep -E "^warning|^error" | sort | uniq -c | sort -rn | head -40
+
       - name: 取静态 ffmpeg（随包分发，用户不用自己装）
         run: |
           set -eux
