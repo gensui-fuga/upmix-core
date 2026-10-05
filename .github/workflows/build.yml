@@ -30,31 +30,46 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 缓存 baseline ORT
-        id: ort-cache
         uses: actions/cache@v4
         with:
           path: ort-dist
-          key: ort-baseline-1.23.2-shared-v1
-          # tag 的 run 看不到分支的缓存（GitHub 缓存按分支隔离），
+          key: ort-baseline-1.23.2-shared-v2
+          # tag 的 run 看不到分支的缓存（GitHub 缓存按 ref 隔离），
           # restore-keys 让它退而求其次复用同前缀的缓存，避免发版时重编 ORT。
           restore-keys: |
             ort-baseline-1.23.2-shared-
 
+      - name: 判断 baseline ORT 是否已经就绪
+        id: ort-ready
+        # 这里不能只看 `cache-hit`：`restore-keys` 前缀命中时 `cache-hit` 是 **false**
+        # （只有 key 精确命中才是 true），可文件其实已经恢复出来了。原来的四步全写的
+        # `if: steps.ort-cache.outputs.cache-hit != 'true'`，于是**每次打 tag 发版都会
+        # 把 ONNX Runtime 从头重编一遍**（40~90 分钟）——v0.5.3-legacy 和 v1.0.0-legacy
+        # 都是这么白烧的。改成直接看恢复出来的文件在不在。
+        run: |
+          set -eux
+          if ls ort-dist/lib/libonnxruntime.so.* >/dev/null 2>&1; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            ls -la ort-dist/lib/
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 安装构建依赖
-        if: steps.ort-cache.outputs.cache-hit != 'true'
+        if: steps.ort-ready.outputs.ready != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build gcc g++ python3-dev
 
       - name: 克隆 ONNX Runtime 源码
-        if: steps.ort-cache.outputs.cache-hit != 'true'
+        if: steps.ort-ready.outputs.ready != 'true'
         run: |
           set -eux
           git clone --recursive --depth 1 -b v1.23.2 \
             https://github.com/microsoft/onnxruntime.git ort-src
 
       - name: 准备源码（不删 mlas 的 AVX2 编译选项！）
-        if: steps.ort-cache.outputs.cache-hit != 'true'
+        if: steps.ort-ready.outputs.ready != 'true'
         run: |
           set -eux
           cd ort-src
@@ -67,7 +82,7 @@ jobs:
           echo "源码保持原样，靠全局 -march=x86-64-v2 锁主代码指令集"
 
       - name: 编译 baseline ONNX Runtime（共享库）
-        if: steps.ort-cache.outputs.cache-hit != 'true'
+        if: steps.ort-ready.outputs.ready != 'true'
         timeout-minutes: 90
         run: |
           set -eux
