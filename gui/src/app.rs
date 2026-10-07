@@ -51,6 +51,15 @@ pub struct App {
 
     // auto params
     keep_stems: bool,
+    /// auto 模式的路由参数（对应 core/src/auto.rs 的 StemRouting）。0.5 以来
+    /// 这张「参数」卡片只有 keep_stems 一个勾选框，其余全焊死在默认值——
+    /// 「参数」名不副实。这里把真正影响听感的六个旋钮摆出来。
+    auto_vocal_center: f32,
+    auto_vocal_width: f32,
+    auto_drum_center: f32,
+    auto_other_surround: f32,
+    auto_lfe_gain_db: f32,
+    auto_lfe_hz: f32,
 
     // input
     indir: String,
@@ -117,6 +126,13 @@ impl App {
             vocal_boost_db: 2.0,
             win_size: 4096,
             keep_stems: false,
+            // 与 StemRouting::default() 逐项对齐（core/src/auto.rs），别猜。
+            auto_vocal_center: 1.0,
+            auto_vocal_width: 0.30,
+            auto_drum_center: 0.15,
+            auto_other_surround: 0.60,
+            auto_lfe_gain_db: -3.0,
+            auto_lfe_hz: 150.0,
             indir,
             outdir: String::new(),
             batch: false,
@@ -204,10 +220,22 @@ impl App {
             }
             Mode::Auto => {
                 let keep = self.keep_stems;
+                // StemRouting 从界面值组装。lfe_hz 用 clamp 不用 slider 范围
+                // 兜底：字段是 f32，手输不会发生，但 mode 切换等路径仍可能
+                // 带进来极端值，route() 对 0/负分频没有定义。
+                let routing = upmix_core::auto::StemRouting {
+                    vocal_center: self.auto_vocal_center as f64,
+                    vocal_width: self.auto_vocal_width as f64,
+                    drum_center: self.auto_drum_center as f64,
+                    other_surround: self.auto_other_surround as f64,
+                    lfe_gain_db: self.auto_lfe_gain_db as f64,
+                    lfe_hz: self.auto_lfe_hz.clamp(20.0, 500.0) as f64,
+                    ..Default::default()
+                };
                 self.indeterminate = true;
                 self.status = format!("自动分离 {} 个文件（Demucs，较慢）…", inputs.len());
                 std::thread::spawn(move || {
-                    let res = run_batch_auto(&inputs, &outdir, keep, tx.clone());
+                    let res = run_batch_auto(&inputs, &outdir, keep, routing, tx.clone());
                     let _ = tx.send(Msg::Done(res));
                 });
             }
@@ -545,26 +573,69 @@ impl App {
                 }
                 Mode::Auto => {
                     // 内置引擎的模型是写死的（core/src/builtin_sep.rs 里
-                    // ensure_model("htdemucs_ort_v1")）。以前这里摆了一个
-                    // 4 选 1 的下拉框，选完照样跑 htdemucs —— 用户以为选了
-                    // 量化快模型，实际仍是 5× 实时，白等几十分钟。与其骗人
-                    // 不如说清楚，想要别的变体走命令行的 --external-demucs。
+                    // ensure_model("htdemucs_ort_v1")），而且上游
+                    // stem-splitter-core 的模型注册表（include_str! 编进二进制，
+                    // 用户改不了）也只有这一个条目——传 htdemucs_ft 会直接
+                    // "Model not found in registry"。与其摆一个选完照样跑
+                    // htdemucs 的假下拉框，不如说清楚。真要 ft 走命令行：
+                    // upmix-core --mode auto --external-demucs --model htdemucs_ft
+                    // （需要自己 pip install demucs）。
                     ui.label(
                         RichText::new("分离模型：htdemucs（ONNX 版，内置固定）")
                             .color(self.theme.ink2),
                     );
                     ui.label(
                         RichText::new(
-                            "纯 CPU 推理，不需要 Python、不联网。\
-                             要 htdemucs_ft / mdx_extra 这些变体，请用命令行的 \
-                             --external-demucs 配自己装的 demucs。",
+                            "纯 CPU 推理，不需要 Python、不联网。htdemucs_ft（微调集成版，\
+                             质量更好但慢约 4 倍）没有公开的 ONNX 转换，内置引擎跑不了；\
+                             要它请用命令行 --external-demucs --model htdemucs_ft \
+                             配自己装的 demucs。",
                         )
                         .size(12.0)
                         .color(self.theme.ink3),
                     );
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(2.0);
+                    // 路由参数（StemRouting）。改的是分离完之后怎么组装 5.1，
+                    // 不影响分离本身——随便调，不用重跑分离。
+                    ui.label(RichText::new("路由").color(self.theme.ink2));
+                    ui.add(
+                        egui::Slider::new(&mut self.auto_vocal_center, 0.0..=1.5)
+                            .text("人声 → 中置")
+                            .suffix(" ×"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.auto_vocal_width, 0.0..=1.0)
+                            .text("人声 → 左右（宽度）")
+                            .suffix(" ×"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.auto_drum_center, 0.0..=1.0)
+                            .text("鼓 → 中置")
+                            .suffix(" ×"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.auto_other_surround, 0.0..=1.5)
+                            .text("侧向 → 环绕")
+                            .suffix(" ×"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.auto_lfe_gain_db, -18.0..=6.0)
+                            .text("LFE 增益")
+                            .suffix(" dB"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.auto_lfe_hz, 60.0..=250.0)
+                            .text("LFE 分频点")
+                            .suffix(" Hz"),
+                    );
                     ui.checkbox(&mut self.keep_stems, "保留分离出的 stems");
                     ui.label(
-                        RichText::new("路由：人声→中置，鼓/贝斯低频→LFE，other 侧向→环绕。")
+                        RichText::new("路由：人声→中置，鼓/贝斯低频→LFE，other 侧向→环绕。\
+                                       路由在分离之后生效；内置引擎不缓存 stems，\
+                                       每次运行都会重新分离，调参试听要等它跑完。\
+                                       要复用分离结果请用命令行的 --stem-cache。")
                             .size(12.0)
                             .color(self.theme.ink3),
                     );
@@ -1175,6 +1246,7 @@ fn run_batch_auto(
     inputs: &[PathBuf],
     outdir: &str,
     keep: bool,
+    routing: upmix_core::auto::StemRouting,
     tx: Sender<Msg>,
 ) -> Result<PathBuf, String> {
     let total = inputs.len();
@@ -1190,7 +1262,7 @@ fn run_batch_auto(
             file_name(input)
         )));
         // 同上：一个文件坏了不能把整批带走。
-        match run_one_auto(input, outdir, keep, &tx, &mut used) {
+        match run_one_auto(input, outdir, keep, &routing, &tx, &mut used) {
             Ok(p) => last = p,
             Err(e) => skipped.push(format!("{}：{e}", file_name(input))),
         }
@@ -1214,6 +1286,7 @@ fn run_one_auto(
     input: &Path,
     outdir: &str,
     keep: bool,
+    routing: &upmix_core::auto::StemRouting,
     tx: &Sender<Msg>,
     used: &mut HashSet<PathBuf>,
 ) -> Result<PathBuf, String> {
@@ -1264,8 +1337,7 @@ fn run_one_auto(
         bass,
         other,
     };
-    let mut out = upmix_core::auto::route(&stems, &upmix_core::auto::StemRouting::default())
-        .map_err(|e| e.to_string())?;
+    let mut out = upmix_core::auto::route(&stems, routing).map_err(|e| e.to_string())?;
     // 模型出来是 44.1k，重采样回源采样率，保住高采样的源。
     if src_sr != sr {
         let _ = tx.send(Msg::Stage(format!("重采样 {} Hz -> {} Hz …", sr, src_sr)));
