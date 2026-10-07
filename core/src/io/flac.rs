@@ -24,7 +24,13 @@ pub fn read(path: &Path) -> Result<AudioBuffer> {
         match frame_reader.read_next_or_eof(block.into_buffer()) {
             Ok(Some(next)) => block = next,
             Ok(None) => break,
-            Err(e) => return Err(anyhow::anyhow!("decoding FLAC block: {e}")),
+            // `.context()` 而不是 `anyhow!("{e}")`：后者是 Display 插值，
+            // claxon::Error 只留下字符串，source 链断掉——上层（fileio 的
+            // read_any）就没法用 downcast 判断「这是格式错误，值得降级到
+            // ffmpeg 容错解码」还是「IO 错误，降级也白搭」。
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context("decoding FLAC block"));
+            }
         }
         for (ch, chan) in data.iter_mut().enumerate() {
             chan.extend_from_slice(block.channel(ch as u32));
@@ -179,6 +185,52 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         std::env::temp_dir().join(format!("upmix_flac_{tag}_{}_{nanos}.flac", std::process::id()))
+    }
+
+    /// 回归：坏帧 FLAC（帧边界上同步码没了）不该整文件拒收。
+    ///
+    /// 真实来源：下载截断、流里夹垃圾字节。claxon 严格，报
+    /// "Ill-formed FLAC stream: frame sync code missing"；ffmpeg 容错，
+    /// 跳过坏帧继续解。read_any 对 claxon::Error 降级到 ffmpeg，两个都死
+    /// 才报错。这个用例拿一个好文件把中段砸烂来模拟——前提是 PATH 上有
+    /// ffmpeg（CI 有；发行包也随机附带），没有就跳过而不是假装通过。
+    #[test]
+    fn read_any_falls_back_to_ffmpeg_for_corrupt_frame() {
+        let ff = crate::fileio::ffmpeg_path();
+        let probe = std::process::Command::new(&ff)
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let Ok(status) = probe else { return };
+        if !status.success() {
+            return;
+        }
+
+        let n = 8000;
+        let buf = AudioBuffer::from_i32_planar(vec![ramp(16, n, 0.05), ramp(16, n, 0.07)], 48000, 16);
+        let path = temp("corrupt");
+        write(&path, &buf, None).unwrap();
+
+        // 把中段砸烂：同步码 0b11111111111110xx 任一帧头都会被毁掉。
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mid = bytes.len() / 2;
+        for b in &mut bytes[mid..mid + 512] {
+            *b = 0xAA;
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        // claxon 必然报错（不然这个用例测的就不是降级路径了）……
+        assert!(
+            read(&path).is_err(),
+            "claxon 竟然解开了被砸烂的文件——用例失效，得造更深的伤"
+        );
+        // ……而 read_any 走 ffmpeg 降级，应该给出和源相同的形状。
+        let back = crate::fileio::read_any(&path).expect("ffmpeg 降级也没接住坏帧文件");
+        assert_eq!(back.sample_rate, 48000);
+        assert_eq!(back.bits_per_sample, 24, "ffmpeg 侧走 pcm_s24le，位深是 24");
+        assert!(back.num_frames() > n / 2, "解出来的长度短得离谱");
+        let _ = std::fs::remove_file(path);
     }
 
     /// 12bit / 20bit 源：flac CLI 只接受 `--bps` 8/16/24/32，`--bps 12` 会直接以

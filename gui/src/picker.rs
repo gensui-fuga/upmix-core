@@ -124,7 +124,7 @@ fn is_hidden(e: &std::fs::DirEntry) -> bool {
     {
         use std::os::windows::fs::MetadataExt;
         e.metadata()
-            .map(|m| m.attributes() & 0x2 != 0)
+            .map(|m| m.file_attributes() & 0x2 != 0)
             .unwrap_or(false)
     }
     #[cfg(not(windows))]

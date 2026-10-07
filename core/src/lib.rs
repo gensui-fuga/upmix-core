@@ -107,7 +107,28 @@ pub mod fileio {
 
     pub fn read_any(path: &Path) -> Result<AudioBuffer> {
         match ext(path).as_str() {
-            "flac" => flac::read(path),
+            "flac" => {
+                // claxon 对流严格：帧边界上读不到同步码（下载截断、流里夹了
+                // 垃圾字节、文件头之后粘了别的数据）就直接报
+                // "III-formed FLAC stream: frame sync code missing"。而
+                // ffmpeg 的 flac 解码器会尽力容错、跳过坏帧继续解。真实世界
+                // 的「有点损坏但能听」的 FLAC 很多，所以 claxon 失败时降级到
+                // ffmpeg 再试一次，两个都死才报错。
+                //
+                // 只对 claxon::Error 降级：IO 类错误（文件根本读不了）降级也
+                // 必然失败，报原始错误更有用。flac::read 用 .context() 保留了
+                // source 链（见那边注释），这里的 downcast 才成立。
+                flac::read(path).or_else(|e| {
+                    let is_claxon = e
+                        .chain()
+                        .any(|c| c.downcast_ref::<claxon::Error>().is_some());
+                    if is_claxon {
+                        decode_with_ffmpeg(path)
+                    } else {
+                        Err(e)
+                    }
+                })
+            }
             "wav" | "wave" => wav::read(path),
             // 其他格式（mp3/m4a/ogg/aac…）交给自带 ffmpeg，反正它就在旁边。
             _ => decode_with_ffmpeg(path),
