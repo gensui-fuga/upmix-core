@@ -680,7 +680,12 @@ impl App {
                 Some(false) => self.theme.danger,
                 None => self.theme.ink2,
             };
-            ui.label(RichText::new(&self.status).size(13.0).color(color));
+            // .wrap()：错误说明可能好几行长（比如「CPU 没有 AVX2」那条），
+            // 不换行会被水平截断，用户永远看不到关键的那半句。
+            ui.label(
+                egui::Label::new(RichText::new(&self.status).size(13.0).color(color))
+                    .wrap(),
+            );
         });
     }
 
