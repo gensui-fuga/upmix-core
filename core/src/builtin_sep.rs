@@ -38,6 +38,26 @@ fn run_once(
 /// ——反复建/毁 ORT 会话把内存吃穿，分配失败直接 abort，窗口瞬间没了。
 /// 顺带这里也是批量慢的元凶：本来每个文件都在白读一遍 200MB 模型。
 fn load_engine(handle: &ModelHandle) -> Result<(), String> {
+    // CPU 指令集守卫——放在建 ORT 会话**之前**。
+    //
+    // 官方预编译的 onnxruntime.dll / .so（ort-sys 下载的那份）以 AVX2 为基线，
+    // mlas kernel 直接用 _mm256 指令。pre-AVX2 的 CPU（Sandy/Ivy Bridge、
+    // J1900 这类）上会话能建成功，第一条 AVX2 指令一跑就是 SIGILL——
+    // 整个进程瞬间消失，没有任何报错，用户只会说「闪退」。
+    // legacy-cpu 包用 -march=x86-64-v2 重编的 ORT 没这个问题，但那个包
+    // 目前只打 Linux；Windows 的 pre-AVX2 机器拿到主线包跑自动模式就踩这里。
+    // 用指令集探测在崩溃前把话说明白：这是死在硬件能力上，不是程序 bug。
+    #[cfg(target_arch = "x86_64")]
+    {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return Err(
+                "这台 CPU 没有 AVX2，主线包的分离引擎跑不了（跑到这里会直接崩溃，\
+                 也就是「闪退」）。可以：① GUI 用「快速」模式，它不走分离引擎，不受影响；\
+                 ② Linux 用 upmix-core-legacy-bin；Windows 的 legacy 版还没打包。"
+                    .to_string(),
+            );
+        }
+    }
     // CI 靠数这一行来验"引擎到底加载了几次"：旧代码每个文件都会走到这里
     // （2 个文件 = 2 行），修好后一次批量只有 1 行。设了环境变量才打印，
     // 正常使用没有任何输出。
