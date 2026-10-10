@@ -682,7 +682,7 @@ impl App {
             };
             // .wrap()：错误说明可能好几行长（比如「CPU 没有 AVX2」那条），
             // 不换行会被水平截断，用户永远看不到关键的那半句。
-            ui.label(
+            ui.add(
                 egui::Label::new(RichText::new(&self.status).size(13.0).color(color))
                     .wrap(),
             );
